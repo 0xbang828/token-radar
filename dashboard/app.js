@@ -48,12 +48,14 @@
   function round4(n) { return Math.round(n * 1e4) / 1e4; }
 
   // ------------------------------------------------------------------ the model, again
-  // categoryMultiple(): live median for the category shrunk toward the global median, w = n/(n+8), clamp.
+  // categoryMultiple(): live median for the category (winsorised to [p10,p90]) shrunk toward the global
+  // median, w = n/(n+8), clamped to [floor, p90 of the live ratio distribution].
   function multipleOf(category) {
+    var cap = D.ratios.cap > 0 ? D.ratios.cap : M.multiple_cap_fallback;
     var peer = category === null || category === undefined ? undefined : D.ratios.categories[category];
-    if (!peer || peer.n === 0) return clamp(D.ratios.global_median, M.multiple_floor, M.multiple_cap);
+    if (!peer || peer.n === 0) return clamp(D.ratios.global_median, M.multiple_floor, cap);
     var w = peer.n / (peer.n + M.pseudo_count);
-    return clamp(w * peer.median + (1 - w) * D.ratios.global_median, M.multiple_floor, M.multiple_cap);
+    return clamp(w * peer.median + (1 - w) * D.ratios.global_median, M.multiple_floor, cap);
   }
   // Every term of one row, recomputed from the snapshot's own fields.
   function modelOf(r) {
@@ -79,7 +81,23 @@
   var MISMATCH = ROWS.filter(function (x) { return !x.m.agrees; }).length;
 
   // ------------------------------------------------------------------ state
-  var S = { q: '', category: 'all', chain: 'all', kind: 'all', view: 'board', sort: 'rank', dir: 1, sel: null };
+  var S = { q: '', category: 'all', chain: 'all', kind: 'all', section: 'all', view: 'board', sort: 'rank', dir: 1, sel: null };
+
+  // The two ranked sections, in the order the board writes them, with their row counts.
+  var SECTION_META = [
+    { id: 'launch', label: 'Launch candidates', hint: 'a protocol with no token on record and no parent product: the radar\'s subject' },
+    { id: 'live-adjacent', label: 'Live-adjacent products', hint: 'a wrapped, staked, bridged, exchange or versioned product of a token that already trades' }
+  ];
+  var SECTION_COUNT = {};
+  ROWS.forEach(function (x) { SECTION_COUNT[x.r.section] = (SECTION_COUNT[x.r.section] || 0) + 1; });
+  function sectionLabel(id) {
+    for (var i = 0; i < SECTION_META.length; i++) if (SECTION_META[i].id === id) return SECTION_META[i].label;
+    return id;
+  }
+  function secIndex(id) {
+    for (var i = 0; i < SECTION_META.length; i++) if (SECTION_META[i].id === id) return i;
+    return SECTION_META.length;
+  }
 
   // ------------------------------------------------------------------ dom helpers
   function el(tag, attrs) {
@@ -123,14 +141,12 @@
   function stats() {
     var box = document.getElementById('stats');
     clear(box);
-    var launch = ROWS.filter(function (x) { return !x.r.is_derivative; }).length;
-    var deriv = ROWS.length - launch;
     var items = [
       [String(ROWS.length), 'rows ranked'],
-      [String(launch), 'launch candidates'],
-      [String(deriv), 'derivative products'],
+      [String(SECTION_COUNT['launch'] || 0), 'in launch section'],
+      [String(SECTION_COUNT['live-adjacent'] || 0), 'in live-adjacent section'],
       [String(D.early_size), 'below the floor'],
-      [usd(ROWS[0].r.implied_value_usd), 'top implied value'],
+      [usd(ROWS.filter(function (x) { return x.r.section === 'launch'; })[0].r.implied_value_usd), 'top launch value'],
       [D.ratios.peer_count + ' live', 'ratios learned from']
     ];
     items.forEach(function (it) {
@@ -158,6 +174,7 @@
 
   function matches(x) {
     var r = x.r;
+    if (S.section !== 'all' && r.section !== S.section) return false;
     if (S.category !== 'all' && (r.category || 'Other') !== S.category) return false;
     if (S.chain !== 'all' && (r.chains || []).indexOf(S.chain) < 0) return false;
     if (S.kind === 'launch' && r.is_derivative) return false;
@@ -181,7 +198,7 @@
       else if (key === 'multiple') { av = a.m.multiple; bv = b.m.multiple; }
       else if (key === 'implied') { av = a.r.implied_value_usd; bv = b.r.implied_value_usd; }
       else if (key === 'kind') { av = a.r.is_derivative ? 1 : 0; bv = b.r.is_derivative ? 1 : 0; }
-      else { av = a.r.rank; bv = b.r.rank; }
+      else { av = secIndex(a.r.section) * 1e6 + a.r.section_rank; bv = secIndex(b.r.section) * 1e6 + b.r.section_rank; }
       if (av < bv) return -dir;
       if (av > bv) return dir;
       return a.r.rank - b.r.rank;
@@ -216,10 +233,36 @@
     return box;
   }
 
+  function sectionTabs() {
+    var box = document.getElementById('sections');
+    clear(box);
+    var opts = [{ id: 'all', label: 'Both sections', n: ROWS.length }].concat(SECTION_META.map(function (m) {
+      return { id: m.id, label: m.label, n: SECTION_COUNT[m.id] || 0 };
+    }));
+    opts.forEach(function (o) {
+      add(box, el('button', {
+        type: 'button', role: 'tab', class: 'sec-tab', 'data-section': o.id,
+        'aria-selected': String(S.section === o.id),
+        onclick: function () { S.section = o.id; syncHash(); board(); }
+      },
+        el('span', { class: 'sec-name', text: o.label }),
+        el('span', { class: 'sec-count', text: String(o.n) + (o.n === 1 ? ' row' : ' rows') })
+      ));
+    });
+    var note = document.getElementById('section-note');
+    var meta = S.section === 'all' ? null : SECTION_META[S.section === 'launch' ? 0 : 1];
+    note.textContent = meta
+      ? meta.label + ' — ' + meta.hint + '. Ranks run 1..' + (SECTION_COUNT[meta.id] || 0) + ' inside this section alone.'
+      : 'Two ranked sections: launch candidates (the radar\'s subject, ranked 1..' + (SECTION_COUNT['launch'] || 0) +
+        ') and live-adjacent products of a token that already trades (ranked separately, 1..' + (SECTION_COUNT['live-adjacent'] || 0) +
+        '). A rank is never compared across the two: a derivative product\'s multi-billion TVL is not evidence of a launch.';
+  }
+
   function board() {
     var list = visible();
     var tbody = document.getElementById('rows');
     clear(tbody);
+    sectionTabs();
     var top = Math.max.apply(null, ROWS.map(function (x) { return x.r.implied_value_usd; }));
     if (list.length === 0) {
       add(tbody, el('tr', { class: 'empty-row' }, el('td', { colspan: '9' },
@@ -229,29 +272,45 @@
           el('button', { class: 'btn primary', type: 'button', text: 'Clear filters', onclick: reset })
         ))));
     }
-    list.forEach(function (x) {
-      var r = x.r, ch = r.change_7d;
-      var tr = el('tr', {
-        tabindex: '0', 'data-slug': r.slug, 'aria-selected': S.sel === r.slug ? 'true' : 'false',
-        onclick: function () { openDetail(r.slug); },
-        onkeydown: function (e) {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); }
-        }
-      },
-        el('td', { class: 'num', text: String(r.rank) }),
-        el('td', null, el('div', { class: 'cell-name' }, el('b', { text: r.name }), el('span', { class: 'slug', text: r.slug }))),
-        el('td', { text: r.category || 'Other' }),
-        el('td', null, chainChips(r.chains, 2)),
-        el('td', { class: 'num', text: usd(r.tvl_usd) }),
-        el('td', { class: 'num ' + (ch === null ? 'flat' : ch > 0 ? 'pos' : ch < 0 ? 'neg' : 'flat'), text: pct(ch) }),
-        el('td', { class: 'num', text: mult(x.m.multiple) }),
-        el('td', { class: 'num' }, el('div', { class: 'val' },
-          el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(2, Math.round((r.implied_value_usd / top) * 100)) + '%' })),
-          el('b', { text: usd(r.implied_value_usd) })
-        )),
-        el('td', null, kindTag(r))
-      );
-      add(tbody, tr);
+    // Both sections at once are drawn as two blocks, each under its own divider row with its row count.
+    var groups = S.section === 'all'
+      ? SECTION_META.map(function (m, i) { return { meta: m, at: i, rows: list.filter(function (x) { return x.r.section === m.id; }) }; })
+      : [{ meta: null, at: 0, rows: list }];
+    groups.forEach(function (g) {
+      if (g.meta && g.rows.length === 0) return; // a section the filters emptied adds no divider
+      if (g.meta) {
+        add(tbody, el('tr', { class: 'divider', 'data-divider': g.meta.id },
+          el('td', { colspan: '9' },
+            el('div', { class: 'divider-in' },
+              el('b', { text: (g.at === 0 ? '1 · ' : '2 · ') + g.meta.label }),
+              el('span', { class: 'divider-n', text: g.rows.length + ' of ' + (SECTION_COUNT[g.meta.id] || 0) + ' shown' }),
+              el('span', { class: 'divider-hint', text: g.meta.hint })
+            ))));
+      }
+      g.rows.forEach(function (x) {
+        var r = x.r, ch = r.change_7d;
+        var tr = el('tr', {
+          tabindex: '0', 'data-slug': r.slug, 'aria-selected': S.sel === r.slug ? 'true' : 'false',
+          onclick: function () { openDetail(r.slug); },
+          onkeydown: function (e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); }
+          }
+        },
+          el('td', { class: 'num', title: 'section rank ' + r.section_rank + ' of ' + (SECTION_COUNT[r.section] || 0) + ' in ' + sectionLabel(r.section) + '; board rank ' + r.rank + ' of ' + ROWS.length + ' on implied value', text: String(r.section_rank) }),
+          el('td', null, el('div', { class: 'cell-name' }, el('b', { text: r.name }), el('span', { class: 'slug', text: r.slug }))),
+          el('td', { text: r.category || 'Other' }),
+          el('td', null, chainChips(r.chains, 2)),
+          el('td', { class: 'num', text: usd(r.tvl_usd) }),
+          el('td', { class: 'num ' + (ch === null ? 'flat' : ch > 0 ? 'pos' : ch < 0 ? 'neg' : 'flat'), text: pct(ch) }),
+          el('td', { class: 'num', text: mult(x.m.multiple) }),
+          el('td', { class: 'num' }, el('div', { class: 'val' },
+            el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(2, Math.round((r.implied_value_usd / top) * 100)) + '%' })),
+            el('b', { text: usd(r.implied_value_usd) })
+          )),
+          el('td', null, kindTag(r))
+        );
+        add(tbody, tr);
+      });
     });
 
     // the count of shown rows, and the filters that produced it
@@ -269,10 +328,11 @@
     }
     var foot = document.getElementById('board-foot');
     var active = [S.q ? 'search “' + S.q + '”' : '', S.category !== 'all' ? 'category ' + S.category : '',
-      S.chain !== 'all' ? 'chain ' + S.chain : '', S.kind !== 'all' ? 'kind ' + S.kind : ''].filter(Boolean);
+      S.chain !== 'all' ? 'chain ' + S.chain : '', S.kind !== 'all' ? 'kind ' + S.kind : '',
+      S.section !== 'all' ? 'section ' + sectionLabel(S.section) : ''].filter(Boolean);
     clear(foot);
     add(foot, active.length === 0
-      ? 'No filter: all ' + ROWS.length + ' ranked rows, sorted by ' + labelOf(S.sort) + (S.dir === 1 ? ' ascending' : ' descending') + '. Every value is recomputed in this page and matches the board.'
+      ? 'No filter: all ' + ROWS.length + ' ranked rows in two sections (' + (SECTION_COUNT['launch'] || 0) + ' launch candidates, ' + (SECTION_COUNT['live-adjacent'] || 0) + ' live-adjacent products), sorted by ' + labelOf(S.sort) + (S.dir === 1 ? ' ascending' : ' descending') + '. Every value is recomputed in this page and matches the board.'
       : 'Filtered by ' + active.join(', ') + '. ' + list.length + ' row' + (list.length === 1 ? '' : 's') + ' shown of ' + ROWS.length + '.');
     sortableHeaders();
   }
@@ -306,7 +366,9 @@
     lede.textContent = 'Model ' + D.model_version + ' prices every pre-token protocol on the board with one function. ' +
       'The multiple is not a constant: it is the mcap/TVL ratio the protocol\'s own category has actually traded at, ' +
       'learned from the ' + D.ratios.peer_count + ' protocols in this snapshot that record both a market cap and a TVL. ' +
-      'The board holds ' + ROWS.length + ' rows, all ' + D.watchlist_size + ' watchlist protocols among them, plus ' +
+      'The board holds ' + ROWS.length + ' rows in two ranked sections — ' + (SECTION_COUNT['launch'] || 0) +
+      ' launch candidates and ' + (SECTION_COUNT['live-adjacent'] || 0) + ' live-adjacent products of a token that already trades — ' +
+      'all ' + D.watchlist_size + ' watchlist protocols among them, plus ' +
       D.early_size + ' pre-token protocols below the $' + Math.round(D.floor_usd / 1e6) + 'M floor.';
 
     var f = document.getElementById('formula');
@@ -315,7 +377,7 @@
       el('div', null, 'implied = max(1, round( tvl_usd', el('b', { text: ' × multiple' }), el('b', { text: ' × growth' }),
         el('b', { text: ' × maturity' }), el('b', { text: ' × launch' }), el('b', { text: ' × rarity' }), ' ))'),
       el('div', null, ''),
-      el('div', null, el('em', { text: 'multiple' }), ' = categoryMultiple(category)  // w = n/(n+' + M.pseudo_count + '); w*median + (1-w)*global; clamp ' + M.multiple_floor + '..' + M.multiple_cap),
+      el('div', null, el('em', { text: 'multiple' }), ' = categoryMultiple(category)  // peers winsorised to [p10 ' + D.ratios.winsor_low.toFixed(4) + ', p90 ' + D.ratios.winsor_high.toFixed(4) + ']; w = n/(n+' + M.pseudo_count + '); w*median + (1-w)*global; clamp ' + M.multiple_floor + '..' + D.ratios.cap.toFixed(4)),
       el('div', null, el('em', { text: 'growth' }), '   = 1 + clamp(change_7d, ' + M.growth_floor + ', ' + M.growth_cap + ') / 100 × ' + M.growth_weight),
       el('div', null, el('em', { text: 'maturity' }), ' = ' + M.maturity_floor + ' + min(age_days, ' + M.maturity_days + ') / ' + M.maturity_days + ' × ' + M.maturity_range),
       el('div', null, el('em', { text: 'launch' }), '   = ' + M.launch_derivative + ' if the protocol is a derivative product, else ' + M.launch_full),
@@ -329,9 +391,12 @@
     [
       ['pseudo_count', M.pseudo_count, 'shrinkage weight toward the global median'],
       ['multiple_floor', M.multiple_floor, 'lowest multiple allowed'],
-      ['multiple_cap', M.multiple_cap, 'highest multiple allowed'],
+      ['multiple_cap', D.ratios.cap, 'highest multiple allowed: p90 of the live mcap/TVL distribution, measured from the snapshot'],
+      ['winsor_low', D.ratios.winsor_low, 'p10 of the live mcap/TVL distribution: peer ratios below it are raised to it'],
+      ['winsor_high', D.ratios.winsor_high, 'p90: peer ratios above it are cut to it before any median'],
+      ['multiple_cap_fallback', M.multiple_cap_fallback, 'cap used only when the snapshot carries no live ratio to measure p90 from'],
       ['launch_full', M.launch_full, 'multiplier for a launch candidate'],
-      ['launch_derivative', M.launch_derivative, 'multiplier for a wrapped/staked/bridged/CEX/versioned product'],
+      ['launch_derivative', M.launch_derivative, 'multiplier for a wrapped/staked/bridged/CEX/versioned product, shown in its own section'],
       ['growth_weight', M.growth_weight, 'share of 7d change passed through'],
       ['growth_floor', M.growth_floor, 'lowest 7d change used, per cent'],
       ['growth_cap', M.growth_cap, 'highest 7d change used, per cent'],
@@ -348,11 +413,14 @@
     });
 
     document.getElementById('multiple-note').textContent =
-      'For each category: median mcap/TVL of its live protocols, n of them. w = n / (n + ' + M.pseudo_count + ') is how far ' +
-      'the category median is trusted over the global median of ' + D.ratios.global_median.toFixed(4) + '. One live peer ' +
-      'moves the multiple a ninth of the way; nine peers move it half way. A category with no live peers uses the global ' +
-      'median directly. The result is clamped to ' + M.multiple_floor + '–' + M.multiple_cap + ', so one outlier market cap ' +
-      'cannot price a whole category.';
+      'For each category: median mcap/TVL of its live protocols, n of them. Before any median, every peer ratio is ' +
+      'winsorised into [p10 ' + D.ratios.winsor_low.toFixed(4) + ', p90 ' + D.ratios.winsor_high.toFixed(4) + '] of all ' +
+      D.ratios.peer_count + ' live ratios in the snapshot, so one peer with an absurd market cap cannot set a ' +
+      'category\'s multiple. w = n / (n + ' + M.pseudo_count + ') is how far the category median is trusted over the ' +
+      'global median of ' + D.ratios.global_median.toFixed(4) + '. One live peer moves the multiple a ninth of the way; ' +
+      'nine peers move it half way. A category with no live peers uses the global median directly. The result is clamped ' +
+      'to ' + M.multiple_floor + '–' + D.ratios.cap.toFixed(4) + ' (the cap is the snapshot\'s own p90, no longer a ' +
+      'hand-picked 8.0), so neither an outlier peer nor an outlier category can price the board.';
 
     // category table: every category on the board, its evidence, its multiple, and its row count
     var counts = {};
@@ -367,6 +435,7 @@
         el('td', { text: c }),
         el('td', { class: 'num', text: peer ? String(peer.n) : '0' }),
         el('td', { class: 'num', text: peer ? peer.median.toFixed(4) : '— (global)' }),
+        el('td', { class: 'num', text: peer ? peer.raw_median.toFixed(4) : '—' }),
         el('td', { class: 'num' }, el('span', { class: 'mixbar', title: 'category median share vs global median' },
           el('i', { class: 'own', style: 'width:' + Math.round(w * 100) + '%' }),
           el('i', { class: 'global', style: 'width:' + Math.round((1 - w) * 100) + '%' })
@@ -400,7 +469,7 @@
     add(dialog, el('div', { class: 'd-head' },
       el('div', null,
         el('h2', { id: 'd-title', text: r.name }),
-        el('p', { class: 'slug', text: 'rank ' + r.rank + ' of ' + ROWS.length + ' · ' + r.slug + ' · ' + (r.category || 'no category') })
+        el('p', { class: 'slug', text: 'section ' + sectionLabel(r.section) + ' · rank ' + r.section_rank + ' of ' + (SECTION_COUNT[r.section] || 0) + ' in it · board rank ' + r.rank + ' of ' + ROWS.length + ' on implied value · ' + r.slug + ' · ' + (r.category || 'no category') })
       ),
       el('button', { class: 'd-close', type: 'button', text: 'Close (Esc)', onclick: function () { dialog.close(); } })
     ));
@@ -410,7 +479,7 @@
     add(body, el('div', { class: 'd-hero' },
       el('div', null, el('span', { text: 'Implied value' }), el('b', { text: usd(r.implied_value_usd) })),
       el('div', null, el('span', { text: 'TVL' }), el('b', { text: usd(r.tvl_usd) })),
-      el('div', null, el('span', { text: 'Kind' }), el('b', { text: r.is_derivative ? 'derivative' : 'launch candidate' }))
+      el('div', null, el('span', { text: 'Kind' }), el('b', { text: r.is_derivative ? 'derivative · live-adjacent' : 'launch candidate' }))
     ));
 
     // the snapshot's own fields for this protocol
@@ -432,9 +501,10 @@
       { label: 'TVL', key: 'tvl_usd', value: usdExact(r.tvl_usd), factor: 1,
         note: 'the snapshot figure the whole estimate is built on' },
       { label: 'Category multiple', key: 'multiple', value: mult(m.multiple), factor: m.multiple,
-        note: peer
-          ? 'median ' + peer.median.toFixed(4) + ' over ' + peer.n + ' live ' + r.category + ' protocol' + (peer.n === 1 ? '' : 's') + ', shrunk toward the global ' + D.ratios.global_median.toFixed(4)
-          : 'no live peer in ' + (r.category || 'an unnamed category') + ': the global median ' + D.ratios.global_median.toFixed(4) },
+        note: (peer
+          ? 'winsorised median ' + peer.median.toFixed(4) + ' over ' + peer.n + ' live ' + r.category + ' protocol' + (peer.n === 1 ? '' : 's') + ' (raw median ' + peer.raw_median.toFixed(4) + '), shrunk toward the global ' + D.ratios.global_median.toFixed(4)
+          : 'no live peer in ' + (r.category || 'an unnamed category') + ': the global median ' + D.ratios.global_median.toFixed(4)) +
+          '; peers winsorised to [' + D.ratios.winsor_low.toFixed(4) + ', ' + D.ratios.winsor_high.toFixed(4) + '], multiple capped at ' + D.ratios.cap.toFixed(4) },
       { label: 'Growth', key: 'growth', value: mult(m.growth), factor: m.growth,
         note: '7d change ' + pct(r.change_7d) + ' clamped to ' + M.growth_floor + '–' + M.growth_cap + ', weighted ' + M.growth_weight },
       { label: 'Maturity', key: 'maturity', value: mult(m.maturity), factor: m.maturity,
@@ -515,6 +585,7 @@
     if (S.category !== 'all') p.set('category', S.category);
     if (S.chain !== 'all') p.set('chain', S.chain);
     if (S.kind !== 'all') p.set('kind', S.kind);
+    if (S.section !== 'all') p.set('section', S.section);
     if (S.view !== 'board') p.set('view', S.view);
     if (S.sort !== 'rank') { p.set('sort', S.sort); p.set('dir', String(S.dir)); }
     if (S.sel) p.set('p', S.sel);
@@ -531,6 +602,8 @@
     if (p.get('category')) S.category = p.get('category');
     if (p.get('chain')) S.chain = p.get('chain');
     if (p.get('kind')) S.kind = p.get('kind');
+    var sec = p.get('section');
+    if (sec === 'launch' || sec === 'live-adjacent' || sec === 'all') S.section = sec;
     if (p.get('view')) S.view = p.get('view');
     if (p.get('sort')) S.sort = p.get('sort');
     if (p.get('dir')) S.dir = p.get('dir') === '1' ? 1 : -1;
@@ -552,7 +625,7 @@
   }
 
   function reset() {
-    S.q = ''; S.category = 'all'; S.chain = 'all'; S.kind = 'all';
+    S.q = ''; S.category = 'all'; S.chain = 'all'; S.kind = 'all'; S.section = 'all';
     document.getElementById('q').value = '';
     document.getElementById('f-category').value = 'all';
     document.getElementById('f-chain').value = 'all';

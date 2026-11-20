@@ -143,6 +143,28 @@ button { cursor: pointer; background: none; border: 0; }
 }
 .count b { color: var(--teal); font-weight: 600; }
 
+/* ---------------------------------------------------------------- board sections */
+.sections { display: flex; flex-wrap: wrap; gap: 2px; padding: var(--s3) var(--s4) 0; border-bottom: 1px solid var(--line); }
+.sec-tab {
+  display: inline-flex; align-items: baseline; gap: var(--s2); padding: 8px var(--s3); margin-bottom: -1px;
+  border: 1px solid transparent; border-bottom: 2px solid transparent; border-radius: var(--r2) var(--r2) 0 0;
+  color: var(--ink-2); font-size: var(--fs-small); font-weight: 500; background: none;
+}
+.sec-tab:hover { background: var(--sunk); }
+.sec-tab[aria-selected="true"] { background: var(--surface); border-color: var(--line); border-bottom-color: var(--teal); color: var(--ink); }
+.sec-name { white-space: nowrap; }
+.sec-count { font: 500 var(--fs-micro)/1 var(--mono); padding: 3px 5px; border-radius: 999px; background: var(--sunk); color: var(--muted); }
+.sec-tab[aria-selected="true"] .sec-count { background: var(--teal-soft); color: var(--teal); }
+.section-note { padding: var(--s3) var(--s4); margin: 0; color: var(--muted); font-size: var(--fs-small); max-width: 110ch; border-bottom: 1px solid var(--line); }
+tbody tr.divider, tbody tr.divider:hover { cursor: default; background: var(--sunk); box-shadow: none; }
+tbody tr.divider td { padding: 0; border-bottom: 1px solid var(--line-strong); }
+.divider-in { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s3); padding: 8px var(--s4); border-left: 3px solid var(--teal); }
+tbody tr.divider[data-divider="live-adjacent"] .divider-in { border-left-color: var(--ochre); }
+.divider-in b { font: 600 var(--fs-micro)/1.2 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink); }
+.divider-n { font: 500 var(--fs-micro)/1.2 var(--mono); color: var(--teal); }
+tbody tr.divider[data-divider="live-adjacent"] .divider-n { color: var(--ochre); }
+.divider-hint { font-size: var(--fs-small); color: var(--muted); }
+
 /* ---------------------------------------------------------------- tables */
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r3); overflow: hidden; }
 .panel + .panel { margin-top: var(--s4); }

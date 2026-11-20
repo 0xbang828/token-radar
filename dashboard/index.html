@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Launch Radar — model radar-2</title>
-<meta name="description" content="Pre-token DeFi protocols ranked by an implied value derived from the snapshot's own mcap/TVL ratios.">
+<title>Token Launch Radar — model radar-3</title>
+<meta name="description" content="Pre-token DeFi protocols ranked by an implied value derived from the snapshot's own mcap/TVL ratios, launch candidates separated from products of tokens that already trade.">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -33,6 +33,12 @@
         it is a launch candidate or a wrapped/staked/bridged product of a token that already trades, and how
         scarce pre-token TVL is. Every figure below comes from the sealed snapshot; nothing is hand-picked.
         An implied value is an estimate, not a price and not a promise that a token is issued.
+      </p>
+      <p>
+        The board is split in two, each half ranked on its own: <b>launch candidates</b> — no token on
+        record and no parent product — and <b>live-adjacent products</b>, the wrapped, staked, bridged,
+        exchange and versioned products of a token that already trades. A derivative product's
+        multi-billion TVL is not evidence of a launch, so it no longer competes for a launch rank.
       </p>
     </div>
     <div class="stats" id="stats" aria-label="Board at a glance"></div>
@@ -71,12 +77,14 @@
   </section>
 
   <section id="board-panel" class="panel" role="tabpanel" aria-labelledby="tab-board">
+    <div class="sections" id="sections" role="tablist" aria-label="Board sections"></div>
+    <p class="section-note" id="section-note"></p>
     <div class="table-wrap">
       <table id="board">
-        <caption class="caption" id="board-caption">Pre-token protocols ranked by implied value. Select a row for its model terms and farm plan.</caption>
+        <caption class="caption" id="board-caption">Two ranked sections: launch candidates, then live-adjacent products of a token that already trades. Ranks run 1..n inside each section. Select a row for its model terms and farm plan.</caption>
         <thead>
           <tr>
-            <th scope="col" class="sortable" data-key="rank" aria-sort="ascending"><button type="button">Rank</button></th>
+            <th scope="col" class="sortable" data-key="rank" aria-sort="ascending" title="rank inside the row's own section (1..n); the row's whole-board rank is shown in its detail view"><button type="button">Rank</button></th>
             <th scope="col" class="sortable" data-key="name"><button type="button">Protocol</button></th>
             <th scope="col" class="sortable" data-key="category"><button type="button">Category</button></th>
             <th scope="col" class="sortable" data-key="chains"><button type="button">Chains</button></th>
@@ -137,10 +145,12 @@
     <div class="panel pad">
       <h2 class="panel-h">Category multiples, from the snapshot's live protocols</h2>
       <p class="caption">
-        Median mcap/TVL of every protocol in the category that records a market cap and TVL, shrunk toward
-        the global median with a pseudo-count of 8 (w = n / (n + 8)), then clamped to 0.02–8.0. A category
-        with no live peers simply takes the global median. The last column is the multiple this page computes
-        for that category, and the board's rows must agree with it.
+        Median mcap/TVL of every protocol in the category that records a market cap and TVL, winsorised
+        into [p10, p90] of the snapshot's whole live ratio distribution (the "Raw median" column is the
+        unclamped figure, for comparison), shrunk toward the global median with a pseudo-count of 8
+        (w = n / (n + 8)), then clamped to 0.02–the snapshot's p90. A category with no live peers simply
+        takes the global median. The last column is the multiple this page computes for that category,
+        and the board's rows must agree with it.
       </p>
       <div class="table-wrap">
         <table id="categories">
@@ -149,6 +159,7 @@
               <th scope="col">Category</th>
               <th scope="col" class="num">Live peers</th>
               <th scope="col" class="num">Median mcap/TVL</th>
+              <th scope="col" class="num">Raw median</th>
               <th scope="col" class="num">Shrink weight</th>
               <th scope="col" class="num">Multiple used</th>
               <th scope="col" class="num">On board</th>

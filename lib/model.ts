@@ -7,14 +7,31 @@
 // the ranked board.
 //
 // ---------------------------------------------------------------------------------------------------
-// MODEL radar-2 — every term comes from the snapshot's own fields; no protocol name is special-cased.
+// MODEL radar-3 — every term comes from the snapshot's own fields; no protocol name is special-cased.
 //
 //   liveRatios : for every protocol with mcap_usd non-null and tvl_usd > 0, ratio = mcap_usd / tvl_usd.
-//                global = median of all those ratios; per category, n = peer count, median = their median.
+//                WINSOR_LOW = p10 and WINSOR_HIGH = p90 of that whole ratio distribution (linear
+//                interpolation between order statistics); every peer ratio is clamped into
+//                [WINSOR_LOW, WINSOR_HIGH] before any median is taken, so one outlier peer (a single
+//                $400 multiple beside a category's real one) cannot set a category's multiple.
+//                global = median of the winsorised ratios; per category, n = peer count, median = median
+//                of their winsorised ratios.
 //   multiple   = categoryMultiple(category):
 //                  no live peers (or no category) -> global
 //                  else w = n / (n + PSEUDO_COUNT);  value = w * median + (1 - w) * global
-//                  clamped to [MULTIPLE_FLOOR, MULTIPLE_CAP] = [0.02, 8.0], PSEUDO_COUNT = 8.
+//                  clamped to [MULTIPLE_FLOOR, MULTIPLE_CAP] = [0.02, p90 of the live ratio
+//                  distribution] (radar-2 hand-picked 8.0; the cap is now measured, not chosen),
+//                  PSEUDO_COUNT = 8.
+//   sections   : every row is ranked inside its own section, 1..n, launch candidates first:
+//                  'launch'         rows with isDerivativeProduct(p) === false
+//                  'live-adjacent'  rows with isDerivativeProduct(p) === true
+//                No row is dropped: the watchlist coverage gate sees every slug either way, and a
+//                derivative product's $7-13B TVL can no longer outrank a pre-token protocol 100x smaller.
+//                `rank` is the whole-board place (1..N once each, never rising on implied value: what the
+//                gate's sorted_by_value row reads), and `section_rank` is the same row's place inside its
+//                own section (1..n). The board array is written section by section so it reads as the
+//                dashboard draws it; the dashboard and the detail view rank on `section_rank` where a
+//                section is shown alone, and never compare a section rank across sections.
 //   launch     = isDerivativeProduct(p) ? LAUNCH_DERIVATIVE (0.55) : LAUNCH_FULL (1.0).
 //                A derivative product is one whose name carries a whole word wrapped|staked|staking
 //                (any case), begins with an exchange name (Binance, Coinbase, Bybit, Kraken, Bitget,
@@ -61,7 +78,8 @@ export interface Snapshot {
 export interface ModelConstants {
   pseudo_count: number;
   multiple_floor: number;
-  multiple_cap: number;
+  /** Used only when a snapshot carries no live ratio at all, so the cap cannot be measured. */
+  multiple_cap_fallback: number;
   launch_full: number;
   launch_derivative: number;
   growth_weight: number;
@@ -77,7 +95,7 @@ export interface ModelConstants {
 export const MODEL: ModelConstants = {
   pseudo_count: 8,
   multiple_floor: 0.02,
-  multiple_cap: 8.0,
+  multiple_cap_fallback: 8.0,
   launch_full: 1.0,
   launch_derivative: 0.55,
   growth_weight: 0.5,
@@ -91,7 +109,16 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
+
+/** The quantiles the model winsorises peer ratios to, and caps the multiple at. */
+export const WINSOR_LOW_Q = 0.1;
+export const WINSOR_HIGH_Q = 0.9;
+
+/** The two ranked sections of the board, in the order the dashboard shows them. */
+export type Section = 'launch' | 'live-adjacent';
+
+export const SECTIONS: readonly Section[] = ['launch', 'live-adjacent'];
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -106,16 +133,26 @@ export interface FarmStep {
   time: string;
 }
 
-/** The mcap/TVL evidence the model learns from: one median per category, plus the global median. */
+/** The mcap/TVL evidence the model learns from: winsorised medians, the band, and the measured cap. */
 export interface LiveRatios {
   global_median: number;
   peer_count: number;
-  categories: Record<string, { n: number; median: number }>;
+  /** p10 of the whole live ratio distribution: peer ratios below it are raised to it. */
+  winsor_low: number;
+  /** p90 of the whole live ratio distribution: peer ratios above it, and the multiple itself, are cut to it. */
+  winsor_high: number;
+  /** The multiple's ceiling, measured as winsor_high (the snapshot's own p90), not hand-picked. */
+  cap: number;
+  categories: Record<string, { n: number; median: number; raw_median: number }>;
 }
 
 /** One row of board.json: the ranked board's row. */
 export interface BoardRow {
+  /** The row's place on the whole board on implied value, 1..N once each, never rising. */
   rank: number;
+  /** The row's place inside its own section, 1..n once each: the ordering the section is ranked on. */
+  section_rank: number;
+  section: Section;
   slug: string;
   name: string;
   category: string | null;
@@ -135,6 +172,9 @@ export interface BoardRow {
     peer_count: number;
     category_median: number | null;
     global_median: number;
+    winsor_low: number;
+    winsor_high: number;
+    multiple_cap: number;
     launch_multiplier: number;
     growth_pct: number;
     growth_multiplier: number;
@@ -149,6 +189,8 @@ export interface BoardRow {
 /** The dashboard's view of one row: the raw inputs, the terms, and the farm plan the board carries. */
 export interface RadarRow {
   rank: number;
+  section_rank: number;
+  section: Section;
   slug: string;
   name: string;
   category: string | null;
@@ -157,9 +199,13 @@ export interface RadarRow {
   change_7d: number | null;
   listed_at: string | null;
   age_days: number | null;
+  section: Section;
   is_derivative: boolean;
   implied_value_usd: number;
   category_multiple: number;
+  winsor_low: number;
+  winsor_high: number;
+  multiple_cap: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   launch_multiplier: number;
@@ -191,6 +237,11 @@ export interface RadarData {
   early_size: number;
   live_size: number;
   derivative_size: number;
+  launch_size: number;
+  live_adjacent_size: number;
+  multiple_cap: number;
+  winsor_low: number;
+  winsor_high: number;
   max_pre_token_tvl: number;
   ratios: LiveRatios;
   rows: RadarRow[];
@@ -228,6 +279,16 @@ function median(values: number[]): number {
   return n % 2 === 1 ? sorted[(n - 1) / 2]! : (sorted[n / 2 - 1]! + sorted[n / 2]!) / 2;
 }
 
+/** A quantile of an unsorted list: linear interpolation between order statistics (type 7, as R). */
+export function quantile(values: number[], q: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const pos = (sorted.length - 1) * Math.min(1, Math.max(0, q));
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (pos - lo);
+}
+
 /** Whether a protocol records no token at all. */
 export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
@@ -261,8 +322,16 @@ export function isRankable(p: SnapshotProtocol): boolean {
   return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
 }
 
-/** The mcap/TVL evidence from the snapshot's live protocols (mcap recorded, TVL positive). */
-export function buildLiveRatios(snapshot: Snapshot): LiveRatios {
+/**
+ * The mcap/TVL evidence from the snapshot's live protocols (mcap recorded, TVL positive).
+ *
+ * Radar-3: every peer ratio is winsorised into [p10, p90] of the whole live ratio distribution before
+ * any median is taken, so a single peer with an absurd multiple (rain's 400x beside prediction-fun's
+ * only peer) cannot hand a category the cap. The cap itself is the distribution's p90, measured from
+ * the snapshot rather than hand-picked; `MODEL.multiple_cap_fallback` only stands in when the snapshot
+ * carries no live ratio at all and the cap cannot be measured.
+ */
+export function buildLiveRatios(snapshot: Snapshot, model: ModelConstants = MODEL): LiveRatios {
   const byCategory = new Map<string, number[]>();
   const all: number[] = [];
   for (const p of snapshot.protocols) {
@@ -275,18 +344,34 @@ export function buildLiveRatios(snapshot: Snapshot): LiveRatios {
       byCategory.set(p.category, list);
     }
   }
-  const categories: Record<string, { n: number; median: number }> = {};
-  for (const [category, ratios] of byCategory) categories[category] = { n: ratios.length, median: median(ratios) };
-  return { global_median: all.length > 0 ? median(all) : MODEL.multiple_floor, peer_count: all.length, categories };
+  const winsorLow = all.length > 0 ? quantile(all, WINSOR_LOW_Q) : 0;
+  const winsorHigh = all.length > 0 ? quantile(all, WINSOR_HIGH_Q) : model.multiple_cap_fallback;
+  const cap = winsorHigh > 0 ? winsorHigh : model.multiple_cap_fallback;
+  const winsorise = (ratio: number): number => Math.min(winsorHigh, Math.max(winsorLow, ratio));
+  const categories: Record<string, { n: number; median: number; raw_median: number }> = {};
+  for (const [category, ratios] of byCategory) {
+    categories[category] = { n: ratios.length, median: median(ratios.map(winsorise)), raw_median: round4(median(ratios)) };
+  }
+  return {
+    global_median: all.length > 0 ? median(all.map(winsorise)) : model.multiple_floor,
+    peer_count: all.length,
+    // Unrounded: the page recomputes every row with these exact numbers and must land on the same value.
+    winsor_low: winsorLow,
+    winsor_high: winsorHigh,
+    cap,
+    categories,
+  };
 }
 
 /**
- * What one dollar of this category's TVL has been worth as market cap: the category's live median
- * shrunk toward the global median with a pseudo-count of 8, clamped to [0.02, 8.0]. A category with
- * no live peers uses the global median.
+ * What one dollar of this category's TVL has been worth as market cap: the category's winsorised live
+ * median shrunk toward the winsorised global median with a pseudo-count of 8, clamped to
+ * [0.02, p90 of the snapshot's live ratio distribution]. A category with no live peers uses the global
+ * median.
  */
 export function categoryMultiple(category: string | null, ratios: LiveRatios, model: ModelConstants = MODEL): number {
-  const clamp = (v: number): number => Math.min(model.multiple_cap, Math.max(model.multiple_floor, v));
+  const cap = ratios.cap > 0 ? ratios.cap : model.multiple_cap_fallback;
+  const clamp = (v: number): number => Math.min(cap, Math.max(model.multiple_floor, v));
   const peers = category === null ? undefined : ratios.categories[category];
   if (peers === undefined || peers.n === 0) return clamp(ratios.global_median);
   const w = peers.n / (peers.n + model.pseudo_count);
@@ -350,9 +435,14 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
 }
 
-/** The protocols the board ranks, strongest first, with ranks 1..n. */
+/** The section a protocol's row belongs to: derivative products are adjacent to the live market, not launches. */
+export function sectionOf(derivative: boolean): Section {
+  return derivative ? 'live-adjacent' : 'launch';
+}
+
+/** The protocols the board ranks, strongest first, with ranks 1..n inside each section. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const ratios = buildLiveRatios(snapshot);
+  const ratios = buildLiveRatios(snapshot, model);
   const preToken = snapshot.protocols.filter(isPreToken);
   const maxPreTvl = Math.max(1, ...preToken.map((p) => p.tvl_usd));
   const index = bySlug(snapshot.protocols);
@@ -372,38 +462,71 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => ({ p, s: impliedValue(p, snapshot.as_of, ratios, maxPreTvl, model) }));
-  scored.sort((a, b) => b.s.implied - a.s.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  return scored.map(({ p, s }, i) => ({
-    rank: i + 1,
-    slug: p.slug,
-    name: p.name,
-    category: p.category,
-    chains: p.chains,
-    tvl_usd: p.tvl_usd,
-    change_7d: p.change_7d,
-    mcap_usd: p.mcap_usd,
-    listed_at: p.listed_at,
-    gecko_id: p.gecko_id,
-    symbol: p.symbol,
-    token_status: 'pre-token',
-    age_days: s.age,
-    is_derivative: s.derivative,
-    implied_value_usd: s.implied,
-    model: {
-      category_multiple: round4(s.multiple),
-      peer_count: s.peerCount,
-      category_median: s.categoryMedian === null ? null : round4(s.categoryMedian),
-      global_median: round4(ratios.global_median),
-      launch_multiplier: s.launch,
-      growth_pct: s.growthPct,
-      growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
-      rarity_multiplier: round4(s.rarityMult),
-      max_pre_token_tvl: maxPreTvl,
-      age_days: s.age,
-    },
-    farm_steps: farmSteps(p, s.age, s.derivative).map(stepText),
-  }));
+  const byImplied = (a: typeof scored[number], b: typeof scored[number]): number =>
+    b.s.implied - a.s.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0);
+
+  // Every row lands in exactly one section, and each section is ranked 1..n on its own implied value:
+  // a derivative product's multi-billion TVL never buys a place above a launch candidate 100x smaller.
+  // That in-section place is `section_rank`.
+  const sectionRank = new Map<string, { section: Section; rank: number }>();
+  for (const section of SECTIONS) {
+    scored.filter((r) => sectionOf(r.s.derivative) === section).sort(byImplied)
+      .forEach(({ p }, i) => sectionRank.set(p.slug, { section, rank: i + 1 }));
+  }
+
+  // `rank` stays the whole-board ranking the gate reads (competition.yaml, sorted_by_value: "the rows'
+  // ranks are exactly 1 to N once each, and implied_value_usd does not rise as rank ascends"). The board
+  // is written section by section, in section order, so the array reads as the dashboard draws it; the
+  // ranks inside that array are not 1..N in array order, and the page never assumes they are.
+  const ranked: BoardRow[] = [];
+  for (const section of SECTIONS) {
+    const list = scored.filter((r) => sectionOf(r.s.derivative) === section).sort(byImplied);
+    for (const { p, s } of list) {
+      ranked.push({
+        rank: 0,
+        section,
+        section_rank: sectionRank.get(p.slug)!.rank,
+        slug: p.slug,
+        name: p.name,
+        category: p.category,
+        chains: p.chains,
+        tvl_usd: p.tvl_usd,
+        change_7d: p.change_7d,
+        mcap_usd: p.mcap_usd,
+        listed_at: p.listed_at,
+        gecko_id: p.gecko_id,
+        symbol: p.symbol,
+        token_status: 'pre-token',
+        age_days: s.age,
+        is_derivative: s.derivative,
+        implied_value_usd: s.implied,
+        model: {
+          category_multiple: round4(s.multiple),
+          peer_count: s.peerCount,
+          category_median: s.categoryMedian === null ? null : round4(s.categoryMedian),
+          global_median: round4(ratios.global_median),
+          winsor_low: ratios.winsor_low,
+          winsor_high: ratios.winsor_high,
+          multiple_cap: ratios.cap,
+          launch_multiplier: s.launch,
+          growth_pct: s.growthPct,
+          growth_multiplier: round4(s.growthMult),
+          maturity_multiplier: round4(s.maturityMult),
+          rarity_multiplier: round4(s.rarityMult),
+          max_pre_token_tvl: maxPreTvl,
+          age_days: s.age,
+        },
+        farm_steps: farmSteps(p, s.age, s.derivative).map(stepText),
+      });
+    }
+  }
+  // The whole-board ranking, assigned over the finished rows: 1..N once each, never rising in implied value.
+  // Ties break on the section's own order, so a rank is stable from run to run.
+  const order = [...ranked].sort((a, b) => b.implied_value_usd - a.implied_value_usd
+    || SECTIONS.indexOf(a.section) - SECTIONS.indexOf(b.section)
+    || a.section_rank - b.section_rank);
+  order.forEach((r, i) => { r.rank = i + 1; });
+  return ranked;
 }
 
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
@@ -566,6 +689,8 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 export function radarRow(row: BoardRow): RadarRow {
   return {
     rank: row.rank,
+    section_rank: row.section_rank,
+    section: row.section,
     slug: row.slug,
     name: row.name,
     category: row.category,
@@ -577,6 +702,9 @@ export function radarRow(row: BoardRow): RadarRow {
     is_derivative: row.is_derivative,
     implied_value_usd: row.implied_value_usd,
     category_multiple: row.model.category_multiple,
+    winsor_low: row.model.winsor_low,
+    winsor_high: row.model.winsor_high,
+    multiple_cap: row.model.multiple_cap,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     launch_multiplier: row.model.launch_multiplier,
@@ -589,9 +717,10 @@ export function radarRow(row: BoardRow): RadarRow {
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
-  const ratios = buildLiveRatios(snapshot);
+  const ratios = buildLiveRatios(snapshot, model);
   const preToken = snapshot.protocols.filter(isPreToken);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const launchSize = board.filter((r) => r.section === 'launch').length;
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -604,6 +733,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     early_size: early,
     live_size: live.length,
     derivative_size: board.filter((r) => r.is_derivative).length,
+    launch_size: launchSize,
+    live_adjacent_size: board.length - launchSize,
+    multiple_cap: ratios.cap,
+    winsor_low: ratios.winsor_low,
+    winsor_high: ratios.winsor_high,
     max_pre_token_tvl: Math.max(1, ...preToken.map((p) => p.tvl_usd)),
     ratios,
     rows: board.map(radarRow),
@@ -655,14 +789,32 @@ export function parseSnapshot(text: string): Snapshot {
   };
 }
 
-/** Why a board is not one the gate will take, or null: coverage, ranks, order, one shared implied value, and farm steps. */
+/** Why a board is not one the gate will take, or null: coverage, ranks per section, order, one shared implied value, and farm steps. */
 export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null {
   const slugs = new Set(board.map((r) => r.slug));
   const missing = snapshot.watchlist.filter((s) => !slugs.has(s));
   if (missing.length > 0) return `the board misses ${missing.length} watchlist slug${missing.length === 1 ? '' : 's'}: ${missing.slice(0, 5).join(', ')}`;
+  for (const r of board) {
+    const want: Section = r.is_derivative ? 'live-adjacent' : 'launch';
+    if (r.section !== want) return `${r.slug} sits in section ${r.section} but ${want} is its own`;
+  }
+  // rank: 1..N once each across the whole board, never rising in implied value (the gate's sorted_by_value).
   const ranks = board.map((r) => r.rank).sort((a, b) => a - b);
   for (let i = 0; i < ranks.length; i++) if (ranks[i] !== i + 1) return `rank ${i + 1} is ${ranks[i]}`;
-  for (let i = 1; i < board.length; i++) if (board[i]!.implied_value_usd > board[i - 1]!.implied_value_usd) return `row ${i + 1} outranks row ${i} on implied value`;
+  const global = [...board].sort((a, b) => a.rank - b.rank);
+  for (let i = 1; i < global.length; i++) if (global[i]!.implied_value_usd > global[i - 1]!.implied_value_usd) {
+    return `rank ${i + 1} outranks rank ${i} on implied value`;
+  }
+  // section_rank: 1..n once each inside each section, in the same implied-value order as `rank` sees.
+  for (const section of SECTIONS) {
+    const rows = board.filter((r) => r.section === section).sort((a, b) => a.section_rank - b.section_rank);
+    for (let i = 0; i < rows.length; i++) if (rows[i]!.section_rank !== i + 1) {
+      return `section ${section}: section_rank ${i + 1} is ${rows[i]!.section_rank}`;
+    }
+    for (let i = 1; i < rows.length; i++) if (rows[i]!.implied_value_usd > rows[i - 1]!.implied_value_usd) {
+      return `section ${section}: section_rank ${i + 1} outranks section_rank ${i} on implied value`;
+    }
+  }
   if (board.length >= 2 && board[0]!.implied_value_usd === board[board.length - 1]!.implied_value_usd) {
     return `all ${board.length} rows share the same implied value $${board[0]!.implied_value_usd}: a board that ranks nothing by value is not a ranking`;
   }
