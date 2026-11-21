@@ -256,11 +256,8 @@ table.mini { font-size: var(--fs-small); }
 table.mini td { padding: 5px 0; border-bottom: 1px dotted var(--line); }
 table.mini td:last-child { text-align: right; font-family: var(--mono); }
 table.mini tr:last-child td { border-bottom: 0; }
-#categories td.num, #live td.num { font-family: var(--mono); }
-.mixbar { display: inline-flex; width: 90px; height: 6px; border-radius: 3px; overflow: hidden; background: var(--sunk); }
-.mixbar i { display: block; height: 100%; }
-.mixbar .own { background: var(--teal); }
-.mixbar .global { background: var(--line-strong); }
+#ladder td.num, #live td.num { font-family: var(--mono); }
+#ladder td.num b { font-weight: 600; }
 
 /* ---------------------------------------------------------------- detail drawer */
 dialog#detail {

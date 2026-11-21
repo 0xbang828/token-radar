@@ -2,3 +2,5 @@ out/
 out2/
 .session.log
 .task-prompt.txt
+.task-v4.txt
+.v4.log

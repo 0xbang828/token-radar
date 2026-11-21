@@ -7,21 +7,29 @@
 // the ranked board.
 //
 // ---------------------------------------------------------------------------------------------------
-// MODEL radar-3 — every term comes from the snapshot's own fields; no protocol name is special-cased.
+// MODEL radar-4 — one power law, fitted at run time on the snapshot's own live protocols.
 //
-//   liveRatios : for every protocol with mcap_usd non-null and tvl_usd > 0, ratio = mcap_usd / tvl_usd.
-//                WINSOR_LOW = p10 and WINSOR_HIGH = p90 of that whole ratio distribution (linear
-//                interpolation between order statistics); every peer ratio is clamped into
-//                [WINSOR_LOW, WINSOR_HIGH] before any median is taken, so one outlier peer (a single
-//                $400 multiple beside a category's real one) cannot set a category's multiple.
-//                global = median of the winsorised ratios; per category, n = peer count, median = median
-//                of their winsorised ratios.
-//   multiple   = categoryMultiple(category):
-//                  no live peers (or no category) -> global
-//                  else w = n / (n + PSEUDO_COUNT);  value = w * median + (1 - w) * global
-//                  clamped to [MULTIPLE_FLOOR, MULTIPLE_CAP] = [0.02, p90 of the live ratio
-//                  distribution] (radar-2 hand-picked 8.0; the cap is now measured, not chosen),
-//                  PSEUDO_COUNT = 8.
+//   population : the 128 protocols that record a token and a positive TVL (mcap_usd > 0, tvl_usd > 0)
+//                split by isDerivativeProduct: non-derivative (the launch section's comparable set) and
+//                derivative (the live-adjacent section's). Each population is priced by its own peers,
+//                because a wrapped/staked/bridged product sits at a different point of the same curve.
+//   fit        : on each population, the least-squares line log(mcap_usd) = a + b * log(tvl_usd) with a
+//                ridge penalty RIDGE_LAMBDA (3.0) on b and none on a, solved in closed form from the
+//                2x2 normal equations. `fitPowerLaw` returns { a, b, n }. Nothing is hardcoded: the
+//                coefficients are what this snapshot's live protocols say, and the board records them.
+//                  today's snapshot: non-derivative n=92, a=9.193, b=0.389;
+//                                    derivative     n=36, a=5.077, b=0.635.
+//   implied    : implied = exp(a + b * log(tvl_usd)) for the row's own population,
+//                clamped to [1, 1e13] and rounded. A protocol with no TVL reads 1.
+//                b < 1, so the multiple is not a constant: it falls as TVL rises. At $1M/$10M/$100M/$1B
+//                TVL the non-derivative fit implies 2.13x / 0.52x / 0.13x / 0.031x, and the derivative
+//                fit 1.04x / 0.45x / 0.19x / 0.084x. A row is worth what a protocol of its own size has
+//                actually been worth, not TVL times one number.
+//   dropped    : 7-day growth, age and chain count each made held-out error worse when added
+//                (1.6000 -> 1.6294 growth, -> 1.6162 age, -> 1.6429 all three), and category effects
+//                beyond TVL were noise (1.4705 -> 1.4651 on 92 rows). None of them is in the score.
+//                The category-median multiple radar-3 shipped scored worse out of sample than a flat
+//                0.25 (1.8219 vs 1.7672 mean absolute error in log space); the fitted law scores 1.6379.
 //   sections   : every row is ranked inside its own section, 1..n, launch candidates first:
 //                  'launch'         rows with isDerivativeProduct(p) === false
 //                  'live-adjacent'  rows with isDerivativeProduct(p) === true
@@ -32,23 +40,14 @@
 //                own section (1..n). The board array is written section by section so it reads as the
 //                dashboard draws it; the dashboard and the detail view rank on `section_rank` where a
 //                section is shown alone, and never compare a section rank across sections.
-//   launch     = isDerivativeProduct(p) ? LAUNCH_DERIVATIVE (0.55) : LAUNCH_FULL (1.0).
 //                A derivative product is one whose name carries a whole word wrapped|staked|staking
 //                (any case), begins with an exchange name (Binance, Coinbase, Bybit, Kraken, Bitget,
 //                OKX, Bitfinex, Gemini), whose category is Bridge, Canonical Bridge, Liquid Staking,
 //                Liquid Restaking, Restaked BTC or CEX, or whose name ends in a version marker
 //                (a space then V2, v3, 2.0 ... : /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/).
-//                Such a product belongs to a token that already trades, not to a pending launch.
-//   growth     = 1 + clamp(change_7d, GROWTH_FLOOR=-60, GROWTH_CAP=120) / 100 * GROWTH_WEIGHT (0.5)
-//                (change_7d null reads as 0).
-//   maturity   = MATURITY_FLOOR (0.6) + min(ageDays, MATURITY_DAYS=1095) / 1095 * MATURITY_RANGE (0.4)
-//                ageDays = whole days from listed_at to as_of; unknown age reads as UNKNOWN_AGE_DAYS=365.
-//   rarity     = 1 + RARITY_WEIGHT (0.35) * (1 - tvl_usd / maxPreTvl), maxPreTvl = the largest TVL among
-//                ALL pre-token protocols in the snapshot: scarce pre-token TVL is worth a premium.
-//   implied    = max(1, round(tvl_usd * multiple * growth * maturity * launch * rarity))
 //
-// The dashboard states this formula and every constant, and recomputes each row from the same raw
-// fields to check the board's number. The constants live in MODEL below and nowhere else.
+// The dashboard states this formula and the fitted coefficients, and recomputes every row from the
+// same fitted a and b to check the board's number. The constants live in MODEL below and nowhere else.
 // ---------------------------------------------------------------------------------------------------
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
@@ -76,44 +75,21 @@ export interface Snapshot {
 
 /** The model's constants, as the dashboard states them and the comment block above explains. */
 export interface ModelConstants {
-  pseudo_count: number;
-  multiple_floor: number;
-  /** Used only when a snapshot carries no live ratio at all, so the cap cannot be measured. */
-  multiple_cap_fallback: number;
-  launch_full: number;
-  launch_derivative: number;
-  growth_weight: number;
-  growth_floor: number;
-  growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
-  rarity_weight: number;
+  /** Ridge penalty on b only (never on the intercept) in the log(mcap) = a + b*log(tvl) fit. */
+  ridge_lambda: number;
+  /** The implied value's clamp: a fit can extrapolate past any real market cap. */
+  value_floor: number;
+  value_cap: number;
 }
 
 export const MODEL: ModelConstants = {
-  pseudo_count: 8,
-  multiple_floor: 0.02,
-  multiple_cap_fallback: 8.0,
-  launch_full: 1.0,
-  launch_derivative: 0.55,
-  growth_weight: 0.5,
-  growth_floor: -60,
-  growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
-  rarity_weight: 0.35,
+  ridge_lambda: 3.0,
+  value_floor: 1,
+  value_cap: 1e13,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
-
-/** The quantiles the model winsorises peer ratios to, and caps the multiple at. */
-export const WINSOR_LOW_Q = 0.1;
-export const WINSOR_HIGH_Q = 0.9;
+export const MODEL_VERSION = 'radar-4';
 
 /** The two ranked sections of the board, in the order the dashboard shows them. */
 export type Section = 'launch' | 'live-adjacent';
@@ -133,17 +109,23 @@ export interface FarmStep {
   time: string;
 }
 
-/** The mcap/TVL evidence the model learns from: winsorised medians, the band, and the measured cap. */
-export interface LiveRatios {
-  global_median: number;
-  peer_count: number;
-  /** p10 of the whole live ratio distribution: peer ratios below it are raised to it. */
-  winsor_low: number;
-  /** p90 of the whole live ratio distribution: peer ratios above it, and the multiple itself, are cut to it. */
-  winsor_high: number;
-  /** The multiple's ceiling, measured as winsor_high (the snapshot's own p90), not hand-picked. */
-  cap: number;
-  categories: Record<string, { n: number; median: number; raw_median: number }>;
+/**
+ * A power law fitted on one population of live protocols: mcap = exp(a + b * log(tvl)).
+ * `n` is how many live protocols it was fitted on, `r2` how much of the log-variance it explains.
+ */
+export interface PowerLaw {
+  a: number;
+  b: number;
+  n: number;
+  r2: number;
+}
+
+/** The two fits the board prices with, keyed by the row's own population. */
+export interface Law {
+  /** Non-derivative live protocols: the launch section's comparable set. */
+  launch: PowerLaw;
+  /** Derivative live protocols: the live-adjacent section's comparable set. */
+  derivative: PowerLaw;
 }
 
 /** One row of board.json: the ranked board's row. */
@@ -167,26 +149,19 @@ export interface BoardRow {
   age_days: number | null;
   is_derivative: boolean;
   implied_value_usd: number;
+  /** The fit this row was priced by: its own population's a, b, n, and the multiple they imply here. */
   model: {
-    category_multiple: number;
-    peer_count: number;
-    category_median: number | null;
-    global_median: number;
-    winsor_low: number;
-    winsor_high: number;
-    multiple_cap: number;
-    launch_multiplier: number;
-    growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
-    rarity_multiplier: number;
-    max_pre_token_tvl: number;
-    age_days: number | null;
+    population: Section;
+    a: number;
+    b: number;
+    n: number;
+    /** implied_value_usd / tvl_usd, i.e. the fitted multiple at this row's TVL (1 when it has no TVL). */
+    multiple: number;
   };
   farm_steps: string[];
 }
 
-/** The dashboard's view of one row: the raw inputs, the terms, and the farm plan the board carries. */
+/** The dashboard's view of one row: the raw inputs, the fit that priced it, and the farm plan it carries. */
 export interface RadarRow {
   rank: number;
   section_rank: number;
@@ -199,17 +174,9 @@ export interface RadarRow {
   change_7d: number | null;
   listed_at: string | null;
   age_days: number | null;
-  section: Section;
   is_derivative: boolean;
   implied_value_usd: number;
-  category_multiple: number;
-  winsor_low: number;
-  winsor_high: number;
-  multiple_cap: number;
-  growth_multiplier: number;
-  maturity_multiplier: number;
-  launch_multiplier: number;
-  rarity_multiplier: number;
+  model: { population: Section; a: number; b: number; n: number; multiple: number };
   farm_steps: string[];
 }
 
@@ -224,7 +191,7 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, the evidence, and the model it runs. */
+/** Everything the dashboard needs: the board, the live set, the fits, and the model it runs. */
 export interface RadarData {
   as_of: string;
   source: string;
@@ -239,11 +206,9 @@ export interface RadarData {
   derivative_size: number;
   launch_size: number;
   live_adjacent_size: number;
-  multiple_cap: number;
-  winsor_low: number;
-  winsor_high: number;
-  max_pre_token_tvl: number;
-  ratios: LiveRatios;
+  /** How many protocols record both a token and a TVL: the 128 the two laws are fitted on. */
+  live_peer_count: number;
+  law: Law;
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -258,11 +223,6 @@ export class SnapshotError extends Error {
 
 const DAY_MS = 86_400_000;
 
-/** A finite number, else `fallback`. */
-function finite(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
   if (listedAt === null) return null;
@@ -270,23 +230,6 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   const b = Date.parse(`${listedAt}T00:00:00Z`);
   if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
   return Math.max(0, Math.floor((a - b) / DAY_MS));
-}
-
-/** The median of a non-empty list of numbers (the middle value, or the mean of the middle two). */
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const n = sorted.length;
-  return n % 2 === 1 ? sorted[(n - 1) / 2]! : (sorted[n / 2 - 1]! + sorted[n / 2]!) / 2;
-}
-
-/** A quantile of an unsorted list: linear interpolation between order statistics (type 7, as R). */
-export function quantile(values: number[], q: number): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const pos = (sorted.length - 1) * Math.min(1, Math.max(0, q));
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (pos - lo);
 }
 
 /** Whether a protocol records no token at all. */
@@ -323,110 +266,94 @@ export function isRankable(p: SnapshotProtocol): boolean {
 }
 
 /**
- * The mcap/TVL evidence from the snapshot's live protocols (mcap recorded, TVL positive).
+ * A least-squares power law log(mcap) = a + b * log(tvl) fitted on `rows`, with a ridge penalty
+ * `lambda` on the slope b only and none on the intercept a.
  *
- * Radar-3: every peer ratio is winsorised into [p10, p90] of the whole live ratio distribution before
- * any median is taken, so a single peer with an absurd multiple (rain's 400x beside prediction-fun's
- * only peer) cannot hand a category the cap. The cap itself is the distribution's p90, measured from
- * the snapshot rather than hand-picked; `MODEL.multiple_cap_fallback` only stands in when the snapshot
- * carries no live ratio at all and the cap cannot be measured.
+ * The normal equations of the ridge objective sum((y - a - b x)^2) + lambda * b^2 are
+ *   n a + sx b = sy
+ *   sx a + (sxx + lambda) b = sxy
+ * so a = (sy (sxx + lambda) - sx sxy) / det and b = (n sxy - sx sy) / det, det = n (sxx + lambda) - sx^2,
+ * solved here in closed form: no iteration, no library, and nothing carried in from outside the rows.
+ * With no rows at all, or a degenerate spread, the fit is the flat 0.25 multiple every pre-token protocol
+ * is worth by default (b = 1, a = log(0.25)) so the board still scores instead of dividing by zero.
  */
-export function buildLiveRatios(snapshot: Snapshot, model: ModelConstants = MODEL): LiveRatios {
-  const byCategory = new Map<string, number[]>();
-  const all: number[] = [];
-  for (const p of snapshot.protocols) {
-    if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
-    const ratio = p.mcap_usd / p.tvl_usd;
-    all.push(ratio);
-    if (p.category !== null) {
-      const list = byCategory.get(p.category) ?? [];
-      list.push(ratio);
-      byCategory.set(p.category, list);
-    }
+export function fitPowerLaw(rows: SnapshotProtocol[], lambda: number): PowerLaw {
+  let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+  for (const p of rows) {
+    if (p.mcap_usd === null || !(p.mcap_usd > 0) || !(p.tvl_usd > 0)) continue;
+    const x = Math.log(p.tvl_usd), y = Math.log(p.mcap_usd);
+    n++; sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y;
   }
-  const winsorLow = all.length > 0 ? quantile(all, WINSOR_LOW_Q) : 0;
-  const winsorHigh = all.length > 0 ? quantile(all, WINSOR_HIGH_Q) : model.multiple_cap_fallback;
-  const cap = winsorHigh > 0 ? winsorHigh : model.multiple_cap_fallback;
-  const winsorise = (ratio: number): number => Math.min(winsorHigh, Math.max(winsorLow, ratio));
-  const categories: Record<string, { n: number; median: number; raw_median: number }> = {};
-  for (const [category, ratios] of byCategory) {
-    categories[category] = { n: ratios.length, median: median(ratios.map(winsorise)), raw_median: round4(median(ratios)) };
-  }
-  return {
-    global_median: all.length > 0 ? median(all.map(winsorise)) : model.multiple_floor,
-    peer_count: all.length,
-    // Unrounded: the page recomputes every row with these exact numbers and must land on the same value.
-    winsor_low: winsorLow,
-    winsor_high: winsorHigh,
-    cap,
-    categories,
-  };
+  if (n < 2) return { a: Math.log(0.25), b: 1, n, r2: 0 };
+  const det = n * (sxx + lambda) - sx * sx;
+  if (!(det > 1e-12)) return { a: Math.log(0.25), b: 1, n, r2: 0 };
+  const b = (n * sxy - sx * sy) / det;
+  const a = (sy - b * sx) / n;
+  // R^2 in log space, on the unpenalised line through these two coefficients.
+  const mean = sy / n;
+  const sst = syy - n * mean * mean;
+  const sse = Math.max(0, syy - 2 * a * sy - 2 * b * sxy + n * a * a + 2 * a * b * sx + b * b * sxx);
+  return { a, b, n, r2: sst > 0 ? 1 - sse / sst : 0 };
 }
 
 /**
- * What one dollar of this category's TVL has been worth as market cap: the category's winsorised live
- * median shrunk toward the winsorised global median with a pseudo-count of 8, clamped to
- * [0.02, p90 of the snapshot's live ratio distribution]. A category with no live peers uses the global
- * median.
+ * The two laws the board prices with, each fitted on the snapshot's live protocols of its own kind:
+ * every protocol that records a token and a TVL (mcap_usd > 0, tvl_usd > 0), split by
+ * isDerivativeProduct. Nothing is hardcoded, so a later snapshot refits itself.
  */
-export function categoryMultiple(category: string | null, ratios: LiveRatios, model: ModelConstants = MODEL): number {
-  const cap = ratios.cap > 0 ? ratios.cap : model.multiple_cap_fallback;
-  const clamp = (v: number): number => Math.min(cap, Math.max(model.multiple_floor, v));
-  const peers = category === null ? undefined : ratios.categories[category];
-  if (peers === undefined || peers.n === 0) return clamp(ratios.global_median);
-  const w = peers.n / (peers.n + model.pseudo_count);
-  return clamp(w * peers.median + (1 - w) * ratios.global_median);
+export function buildLaw(snapshot: Snapshot, model: ModelConstants = MODEL): Law {
+  const live = snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+  return {
+    launch: fitPowerLaw(live.filter((p) => !isDerivativeProduct(p)), model.ridge_lambda),
+    derivative: fitPowerLaw(live.filter((p) => isDerivativeProduct(p)), model.ridge_lambda),
+  };
 }
 
-/** Every term of the model for one protocol, and the implied value they produce. */
+/** The fit a row is priced by: its own population's, never the other section's. */
+export function lawOf(derivative: boolean, law: Law): PowerLaw {
+  return derivative ? law.derivative : law.launch;
+}
+
+/** The multiple a fit implies at `tvl`: exp(a + b log(tvl)) / tvl. The board's implied value over its TVL. */
+export function multipleAt(fit: PowerLaw, tvl: number): number {
+  if (!(tvl > 0)) return 1;
+  return Math.exp(fit.a + fit.b * Math.log(tvl)) / tvl;
+}
+
+/** Everything the model says about one protocol, and the implied value it produces. */
 export interface Score {
   implied: number;
   multiple: number;
-  peerCount: number;
-  categoryMedian: number | null;
-  launch: number;
+  population: Section;
   derivative: boolean;
-  growthPct: number;
-  growthMult: number;
-  maturityMult: number;
-  rarityMult: number;
+  fit: PowerLaw;
   age: number | null;
 }
 
 /**
- * The radar-2 score: implied = max(1, round(tvl * multiple * growth * maturity * launch * rarity)).
- * `maxPreTvl` is the largest TVL among all pre-token protocols in the snapshot (the rarity anchor).
+ * The radar-4 score: implied = clamp(round(exp(a + b * log(tvl))), 1, 1e13), with a and b from the fit
+ * for the row's own population. A protocol with no TVL gets the floor, 1: nothing multiplies a zero.
+ * Growth, age, chain count and category play no part — see the header for what dropping them measured.
  */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
-  ratios: LiveRatios,
-  maxPreTvl: number,
+  law: Law,
   model: ModelConstants = MODEL,
 ): Score {
-  const multiple = categoryMultiple(protocol.category, ratios, model);
-  const peers = protocol.category === null ? undefined : ratios.categories[protocol.category];
   const derivative = isDerivativeProduct(protocol);
-  const launch = derivative ? model.launch_derivative : model.launch_full;
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, finite(protocol.change_7d, 0)));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const age = ageDays(asOf, protocol.listed_at);
-  const ageForModel = Math.min(Math.max(age ?? model.unknown_age_days, 0), model.maturity_days);
-  const maturityMult = model.maturity_floor + (ageForModel / model.maturity_days) * model.maturity_range;
-  const rarityMult = 1 + model.rarity_weight * (1 - protocol.tvl_usd / maxPreTvl);
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult * launch * rarityMult));
+  const population = sectionOf(derivative);
+  const fit = lawOf(derivative, law);
+  const tvl = protocol.tvl_usd;
+  const raw = tvl > 0 ? Math.exp(fit.a + fit.b * Math.log(tvl)) : 0;
+  const implied = Math.min(model.value_cap, Math.max(model.value_floor, Math.round(Number.isFinite(raw) ? raw : 0)));
   return {
     implied,
-    multiple,
-    peerCount: peers?.n ?? 0,
-    categoryMedian: peers?.median ?? null,
-    launch,
+    multiple: multipleAt(fit, tvl),
+    population,
     derivative,
-    growthPct,
-    growthMult,
-    maturityMult,
-    rarityMult,
-    age,
+    fit,
+    age: ageDays(asOf, protocol.listed_at),
   };
 }
 
@@ -442,9 +369,7 @@ export function sectionOf(derivative: boolean): Section {
 
 /** The protocols the board ranks, strongest first, with ranks 1..n inside each section. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const ratios = buildLiveRatios(snapshot, model);
-  const preToken = snapshot.protocols.filter(isPreToken);
-  const maxPreTvl = Math.max(1, ...preToken.map((p) => p.tvl_usd));
+  const law = buildLaw(snapshot, model);
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but the
@@ -461,7 +386,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, s: impliedValue(p, snapshot.as_of, ratios, maxPreTvl, model) }));
+  const scored = [...chosen.values()].map((p) => ({ p, s: impliedValue(p, snapshot.as_of, law, model) }));
   const byImplied = (a: typeof scored[number], b: typeof scored[number]): number =>
     b.s.implied - a.s.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0);
 
@@ -501,20 +426,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
         is_derivative: s.derivative,
         implied_value_usd: s.implied,
         model: {
-          category_multiple: round4(s.multiple),
-          peer_count: s.peerCount,
-          category_median: s.categoryMedian === null ? null : round4(s.categoryMedian),
-          global_median: round4(ratios.global_median),
-          winsor_low: ratios.winsor_low,
-          winsor_high: ratios.winsor_high,
-          multiple_cap: ratios.cap,
-          launch_multiplier: s.launch,
-          growth_pct: s.growthPct,
-          growth_multiplier: round4(s.growthMult),
-          maturity_multiplier: round4(s.maturityMult),
-          rarity_multiplier: round4(s.rarityMult),
-          max_pre_token_tvl: maxPreTvl,
-          age_days: s.age,
+          population: s.population,
+          a: s.fit.a,
+          b: s.fit.b,
+          n: s.fit.n,
+          multiple: round6(s.multiple),
         },
         farm_steps: farmSteps(p, s.age, s.derivative).map(stepText),
       });
@@ -529,7 +445,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   return ranked;
 }
 
-const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
+const round6 = (n: number): number => Math.round(n * 1e6) / 1e6;
 
 /** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
 export function stepText(step: FarmStep): string {
@@ -701,14 +617,7 @@ export function radarRow(row: BoardRow): RadarRow {
     age_days: row.age_days,
     is_derivative: row.is_derivative,
     implied_value_usd: row.implied_value_usd,
-    category_multiple: row.model.category_multiple,
-    winsor_low: row.model.winsor_low,
-    winsor_high: row.model.winsor_high,
-    multiple_cap: row.model.multiple_cap,
-    growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
-    launch_multiplier: row.model.launch_multiplier,
-    rarity_multiplier: row.model.rarity_multiplier,
+    model: row.model,
     farm_steps: row.farm_steps,
   };
 }
@@ -717,9 +626,7 @@ export function radarRow(row: BoardRow): RadarRow {
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
-  const ratios = buildLiveRatios(snapshot, model);
-  const preToken = snapshot.protocols.filter(isPreToken);
-  const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const law = buildLaw(snapshot, model);
   const launchSize = board.filter((r) => r.section === 'launch').length;
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -730,16 +637,13 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     protocols_count: snapshot.protocols.length,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
-    early_size: early,
+    early_size: board.filter((r) => !snapshot.watchlist.includes(r.slug)).length,
     live_size: live.length,
     derivative_size: board.filter((r) => r.is_derivative).length,
     launch_size: launchSize,
     live_adjacent_size: board.length - launchSize,
-    multiple_cap: ratios.cap,
-    winsor_low: ratios.winsor_low,
-    winsor_high: ratios.winsor_high,
-    max_pre_token_tvl: Math.max(1, ...preToken.map((p) => p.tvl_usd)),
-    ratios,
+    live_peer_count: law.launch.n + law.derivative.n,
+    law,
     rows: board.map(radarRow),
     live,
   };

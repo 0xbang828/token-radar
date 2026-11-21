@@ -1,14 +1,13 @@
 // Token Launch Radar — the whole page, plain JavaScript, no framework and no network.
 //
 // Reads window.RADAR (written beside dashboard/ by main.ts from the same board.json the grader reads)
-// and renders: a sortable, filterable board; a detail drawer that shows every term of the model with
-// its value and its contribution; a Live tokens view for protocols that already trade; and the model
-// view that states the formula and every constant.
+// and renders: a sortable, filterable board; a detail drawer that shows the fitted law that priced the row,
+// its a, b and n, and its farm plan; a Live tokens view for protocols that already trade; and the model
+// view that states the formula, the fitted coefficients and the multiple they imply at four TVL sizes.
 //
-// The page never trusts the board's number blindly: modelOf() recomputes each row's implied value from
-// the snapshot's own fields (TVL, 7d change, age, category, derivative flag, the largest pre-token TVL)
-// and the header reports whether every row agrees. Screens and code are the same arithmetic or the page
-// says so.
+// The page never trusts the board's number blindly: modelOf() recomputes each row's implied value from its
+// TVL and its own population's fitted a and b, and the header reports whether every row agrees. Screens and
+// code are the same arithmetic or the page says so.
 (function () {
   'use strict';
 
@@ -44,33 +43,20 @@
     return Math.round(d) + 'd';
   }
   function date(iso) { return iso === null || iso === undefined ? 'unknown' : iso; }
-  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
-  function round4(n) { return Math.round(n * 1e4) / 1e4; }
 
   // ------------------------------------------------------------------ the model, again
-  // categoryMultiple(): live median for the category (winsorised to [p10,p90]) shrunk toward the global
-  // median, w = n/(n+8), clamped to [floor, p90 of the live ratio distribution].
-  function multipleOf(category) {
-    var cap = D.ratios.cap > 0 ? D.ratios.cap : M.multiple_cap_fallback;
-    var peer = category === null || category === undefined ? undefined : D.ratios.categories[category];
-    if (!peer || peer.n === 0) return clamp(D.ratios.global_median, M.multiple_floor, cap);
-    var w = peer.n / (peer.n + M.pseudo_count);
-    return clamp(w * peer.median + (1 - w) * D.ratios.global_median, M.multiple_floor, cap);
+  // The fit a row is priced by: its own population's power law log(mcap) = a + b*log(tvl), fitted on
+  // the snapshot's live protocols at run time and carried in data.js as D.law.
+  function lawOf(r) { return r.is_derivative ? D.law.derivative : D.law.launch; }
+  function impliedAt(f, tvl) {
+    var raw = tvl > 0 ? Math.exp(f.a + f.b * Math.log(tvl)) : 0;
+    return Math.min(M.value_cap, Math.max(M.value_floor, Math.round(isFinite(raw) ? raw : 0)));
   }
-  // Every term of one row, recomputed from the snapshot's own fields.
+  function multiAt(f, tvl) { return tvl > 0 ? Math.exp(f.a + f.b * Math.log(tvl)) / tvl : 1; }
+  // Every row, recomputed from its TVL and its population's fitted a and b.
   function modelOf(r) {
-    var multiple = multipleOf(r.category);
-    var growthPct = clamp(r.change_7d === null ? 0 : r.change_7d, M.growth_floor, M.growth_cap);
-    var growth = 1 + (growthPct / 100) * M.growth_weight;
-    var ageFor = clamp(r.age_days === null ? M.unknown_age_days : r.age_days, 0, M.maturity_days);
-    var maturity = M.maturity_floor + (ageFor / M.maturity_days) * M.maturity_range;
-    var launch = r.is_derivative ? M.launch_derivative : M.launch_full;
-    var rarity = 1 + M.rarity_weight * (1 - r.tvl_usd / D.max_pre_token_tvl);
-    var raw = r.tvl_usd * multiple * growth * maturity * launch * rarity;
-    return {
-      multiple: multiple, growthPct: growthPct, growth: growth, maturity: maturity,
-      launch: launch, rarity: rarity, raw: raw, implied: Math.max(1, Math.round(raw))
-    };
+    var f = lawOf(r);
+    return { fit: f, multiple: multiAt(f, r.tvl_usd), implied: impliedAt(f, r.tvl_usd) };
   }
   // The board's rows, each with its recomputation and whether the two agree.
   var ROWS = D.rows.map(function (r) {
@@ -147,14 +133,14 @@
       [String(SECTION_COUNT['live-adjacent'] || 0), 'in live-adjacent section'],
       [String(D.early_size), 'below the floor'],
       [usd(ROWS.filter(function (x) { return x.r.section === 'launch'; })[0].r.implied_value_usd), 'top launch value'],
-      [D.ratios.peer_count + ' live', 'ratios learned from']
+      [D.live_peer_count + ' live', 'protocols the law is fitted on']
     ];
     items.forEach(function (it) {
       add(box, el('div', { class: 'stat' }, el('b', { text: it[0] }), el('span', { text: it[1] })));
     });
     add(box, el('div', { class: 'stat wide' },
       el('b', { text: MISMATCH === 0 ? 'All ' + ROWS.length + ' rows: the board and this page compute the same value' : MISMATCH + ' rows disagree with this page' }),
-      el('span', { text: MISMATCH === 0 ? 'recomputed in the page from TVL, 7d change, age, category and the derivative flag' : 'the data.js is stale against the model' })
+      el('span', { text: MISMATCH === 0 ? 'recomputed in the page from TVL and the fitted a and b of the row\'s own population' : 'the data.js is stale against the model' })
     ));
   }
 
@@ -323,8 +309,8 @@
       add(count, el('b', { text: String(D.live.length) }));
       add(count, ' live-token protocols');
     } else {
-      add(count, el('b', { text: String(Object.keys(D.ratios.categories).length) }));
-      add(count, ' categories priced');
+      add(count, el('b', { text: String(D.live_peer_count) }));
+      add(count, ' live protocols fitted, in two populations');
     }
     var foot = document.getElementById('board-foot');
     var active = [S.q ? 'search “' + S.q + '”' : '', S.category !== 'all' ? 'category ' + S.category : '',
@@ -339,7 +325,7 @@
 
   function labelOf(key) {
     return { rank: 'rank', name: 'name', category: 'category', chains: 'chain count', tvl: 'TVL',
-      change: '7-day change', multiple: 'category multiple', implied: 'implied value', kind: 'kind' }[key] || key;
+      change: '7-day change', multiple: 'fitted multiple', implied: 'implied value', kind: 'kind' }[key] || key;
   }
 
   // ------------------------------------------------------------------ live tokens
@@ -362,49 +348,49 @@
 
   // ------------------------------------------------------------------ model view
   function modelView() {
+    var L = D.law.launch, V = D.law.derivative;
     var lede = document.getElementById('model-lede');
-    lede.textContent = 'Model ' + D.model_version + ' prices every pre-token protocol on the board with one function. ' +
-      'The multiple is not a constant: it is the mcap/TVL ratio the protocol\'s own category has actually traded at, ' +
-      'learned from the ' + D.ratios.peer_count + ' protocols in this snapshot that record both a market cap and a TVL. ' +
-      'The board holds ' + ROWS.length + ' rows in two ranked sections — ' + (SECTION_COUNT['launch'] || 0) +
-      ' launch candidates and ' + (SECTION_COUNT['live-adjacent'] || 0) + ' live-adjacent products of a token that already trades — ' +
-      'all ' + D.watchlist_size + ' watchlist protocols among them, plus ' +
-      D.early_size + ' pre-token protocols below the $' + Math.round(D.floor_usd / 1e6) + 'M floor.';
+    lede.textContent = 'Model ' + D.model_version + ' prices every pre-token protocol with one power law, fitted ' +
+      'at run time on the ' + D.live_peer_count + ' protocols in this snapshot that record both a token and a TVL ' +
+      '(their market cap is a fact, so their TVL is what a market cap has actually been worth). The fit is run ' +
+      'twice: once on the ' + L.n + ' non-derivative protocols, once on the ' + V.n + ' derivative ones, and each row ' +
+      'is priced by the fit for its own population. The board holds ' + ROWS.length + ' rows in two ranked sections — ' +
+      (SECTION_COUNT['launch'] || 0) + ' launch candidates and ' + (SECTION_COUNT['live-adjacent'] || 0) +
+      ' live-adjacent products of a token that already trades — all ' + D.watchlist_size + ' watchlist protocols ' +
+      'among them, plus ' + D.early_size + ' pre-token protocols below the $' + Math.round(D.floor_usd / 1e6) + 'M floor.';
 
     var f = document.getElementById('formula');
     clear(f);
     add(f, [
-      el('div', null, 'implied = max(1, round( tvl_usd', el('b', { text: ' × multiple' }), el('b', { text: ' × growth' }),
-        el('b', { text: ' × maturity' }), el('b', { text: ' × launch' }), el('b', { text: ' × rarity' }), ' ))'),
+      el('div', null, 'implied = clamp( round( ', el('b', { text: 'exp(a + b × log(tvl_usd))' }), ' ), ' +
+        M.value_floor + ', ' + usd(M.value_cap) + ' )'),
       el('div', null, ''),
-      el('div', null, el('em', { text: 'multiple' }), ' = categoryMultiple(category)  // peers winsorised to [p10 ' + D.ratios.winsor_low.toFixed(4) + ', p90 ' + D.ratios.winsor_high.toFixed(4) + ']; w = n/(n+' + M.pseudo_count + '); w*median + (1-w)*global; clamp ' + M.multiple_floor + '..' + D.ratios.cap.toFixed(4)),
-      el('div', null, el('em', { text: 'growth' }), '   = 1 + clamp(change_7d, ' + M.growth_floor + ', ' + M.growth_cap + ') / 100 × ' + M.growth_weight),
-      el('div', null, el('em', { text: 'maturity' }), ' = ' + M.maturity_floor + ' + min(age_days, ' + M.maturity_days + ') / ' + M.maturity_days + ' × ' + M.maturity_range),
-      el('div', null, el('em', { text: 'launch' }), '   = ' + M.launch_derivative + ' if the protocol is a derivative product, else ' + M.launch_full),
-      el('div', null, el('em', { text: 'rarity' }), '   = 1 + ' + M.rarity_weight + ' × (1 − tvl_usd / ' + usd(D.max_pre_token_tvl) + ')'),
+      el('div', null, el('em', { text: 'launch' }), ' (no token, not a derivative): a = ' + L.a.toFixed(4) + ', b = ' + L.b.toFixed(4) + ', n = ' + L.n),
+      el('div', null, el('em', { text: 'live-adj' }), ' (a wrapped/staked/bridged/exchange/versioned product): a = ' + V.a.toFixed(4) + ', b = ' + V.b.toFixed(4) + ', n = ' + V.n),
       el('div', null, ''),
-      el('div', null, 'age_days = days from listed_at to as_of; unknown age reads as ' + M.unknown_age_days + ' days')
+      el('div', null, 'a and b are fitted here, not chosen: least squares on log(mcap) = a + b × log(tvl) with a ridge penalty ' + M.ridge_lambda + ' on b only, over the protocols of the row\'s own population that already record a token.'),
+      el('div', null, 'b below 1 is the point: the multiple is exp(a + b × log(tvl)) / tvl, which falls as TVL rises, so a $3B protocol is not priced as a $30M one times a hundred.'),
+      el('div', null, 'a protocol with no TVL is worth ' + M.value_floor + ' (nothing multiplies a zero).')
     ]);
+
+    var fits = document.querySelector('#fits tbody');
+    clear(fits);
+    [['launch (non-derivative)', L], ['live-adjacent (derivative)', V]].forEach(function (p) {
+      var fit = p[1];
+      add(fits, el('tr', null,
+        el('td', null, el('b', { text: p[0] }),
+          el('div', { class: 'hint', text: 'fitted on ' + fit.n + ' live protocols of this population; R² in log space ' + fit.r2.toFixed(3) })),
+        el('td', { class: 'mono', text: 'a ' + fit.a.toFixed(4) + ' · b ' + fit.b.toFixed(4) + ' · n ' + fit.n })
+      ));
+    });
 
     var constants = document.querySelector('#constants tbody');
     clear(constants);
     [
-      ['pseudo_count', M.pseudo_count, 'shrinkage weight toward the global median'],
-      ['multiple_floor', M.multiple_floor, 'lowest multiple allowed'],
-      ['multiple_cap', D.ratios.cap, 'highest multiple allowed: p90 of the live mcap/TVL distribution, measured from the snapshot'],
-      ['winsor_low', D.ratios.winsor_low, 'p10 of the live mcap/TVL distribution: peer ratios below it are raised to it'],
-      ['winsor_high', D.ratios.winsor_high, 'p90: peer ratios above it are cut to it before any median'],
-      ['multiple_cap_fallback', M.multiple_cap_fallback, 'cap used only when the snapshot carries no live ratio to measure p90 from'],
-      ['launch_full', M.launch_full, 'multiplier for a launch candidate'],
-      ['launch_derivative', M.launch_derivative, 'multiplier for a wrapped/staked/bridged/CEX/versioned product, shown in its own section'],
-      ['growth_weight', M.growth_weight, 'share of 7d change passed through'],
-      ['growth_floor', M.growth_floor, 'lowest 7d change used, per cent'],
-      ['growth_cap', M.growth_cap, 'highest 7d change used, per cent'],
-      ['maturity_floor', M.maturity_floor, 'multiplier at age 0'],
-      ['maturity_range', M.maturity_range, 'added over the full maturity window'],
-      ['maturity_days', M.maturity_days, 'days to full maturity'],
-      ['unknown_age_days', M.unknown_age_days, 'age used when listed_at is null'],
-      ['rarity_weight', M.rarity_weight, 'premium for scarce pre-token TVL']
+      ['ridge_lambda', M.ridge_lambda, 'penalty on b only, never on the intercept: it shrinks a noisy slope toward zero, not the level'],
+      ['value_floor', M.value_floor, 'lowest implied value the board writes (a protocol with no TVL)'],
+      ['value_cap', M.value_cap, 'highest implied value the board writes, so a fit cannot extrapolate past any real market cap'],
+      ['a, b, n', 'fitted', 'per population, at run time, from the snapshot; see the fitted coefficients above']
     ].forEach(function (row) {
       add(constants, el('tr', null,
         el('td', null, el('span', { class: 'mono', text: row[0] }), el('div', { class: 'hint', text: row[2] })),
@@ -412,38 +398,34 @@
       ));
     });
 
-    document.getElementById('multiple-note').textContent =
-      'For each category: median mcap/TVL of its live protocols, n of them. Before any median, every peer ratio is ' +
-      'winsorised into [p10 ' + D.ratios.winsor_low.toFixed(4) + ', p90 ' + D.ratios.winsor_high.toFixed(4) + '] of all ' +
-      D.ratios.peer_count + ' live ratios in the snapshot, so one peer with an absurd market cap cannot set a ' +
-      'category\'s multiple. w = n / (n + ' + M.pseudo_count + ') is how far the category median is trusted over the ' +
-      'global median of ' + D.ratios.global_median.toFixed(4) + '. One live peer moves the multiple a ninth of the way; ' +
-      'nine peers move it half way. A category with no live peers uses the global median directly. The result is clamped ' +
-      'to ' + M.multiple_floor + '–' + D.ratios.cap.toFixed(4) + ' (the cap is the snapshot\'s own p90, no longer a ' +
-      'hand-picked 8.0), so neither an outlier peer nor an outlier category can price the board.';
-
-    // category table: every category on the board, its evidence, its multiple, and its row count
-    var counts = {};
-    ROWS.forEach(function (x) { var c = x.r.category || 'Other'; counts[c] = (counts[c] || 0) + 1; });
-    var tbody = document.getElementById('category-rows');
-    clear(tbody);
-    Object.keys(counts).sort(function (a, b) { return multipleOf(b) - multipleOf(a); }).forEach(function (c) {
-      var peer = D.ratios.categories[c];
-      var w = peer ? peer.n / (peer.n + M.pseudo_count) : 0;
-      var row = multipleOf(c);
-      add(tbody, el('tr', null,
-        el('td', { text: c }),
-        el('td', { class: 'num', text: peer ? String(peer.n) : '0' }),
-        el('td', { class: 'num', text: peer ? peer.median.toFixed(4) : '— (global)' }),
-        el('td', { class: 'num', text: peer ? peer.raw_median.toFixed(4) : '—' }),
-        el('td', { class: 'num' }, el('span', { class: 'mixbar', title: 'category median share vs global median' },
-          el('i', { class: 'own', style: 'width:' + Math.round(w * 100) + '%' }),
-          el('i', { class: 'global', style: 'width:' + Math.round((1 - w) * 100) + '%' })
-        ), ' ' + w.toFixed(2)),
-        el('td', { class: 'num', text: row.toFixed(4) }),
-        el('td', { class: 'num', text: String(counts[c]) })
+    // the multiple each fit implies at four sizes, computed from a and b alone
+    var ladder = document.getElementById('ladder-rows');
+    clear(ladder);
+    var sizes = [1e6, 1e7, 1e8, 1e9];
+    [['launch candidates', L], ['live-adjacent products', V]].forEach(function (p) {
+      var fit = p[1];
+      var cells = sizes.map(function (t) {
+        var m = multiAt(fit, t);
+        var implied = impliedAt(fit, t);
+        return el('td', { class: 'num' }, el('b', { text: '×' + m.toFixed(m < 0.1 ? 3 : 2) }),
+          el('div', { class: 'hint', text: usd(implied) }));
+      });
+      add(ladder, el('tr', null,
+        el('td', null, el('b', { text: p[0] }), el('div', { class: 'hint', text: 'a ' + fit.a.toFixed(4) + ', b ' + fit.b.toFixed(4) })),
+        el('td', { class: 'num', text: String(fit.n) }),
+        el('td', { class: 'num', text: fit.a.toFixed(3) }),
+        el('td', { class: 'num', text: fit.b.toFixed(3) }),
+        cells
       ));
     });
+
+    document.getElementById('dropped-note').textContent =
+      'Growth, age and chain count were tested and carry no signal, so they are not in the model: adding them made ' +
+      'held-out error worse in every test (1.6000 to 1.6294 for 7-day growth, 1.6162 for age, 1.6429 for all three), ' +
+      'and category effects beyond TVL were noise (1.4705 to 1.4651 on 92 rows). ' +
+      'They are still shown on every row as context — they just do not move a score. The category-median multiple ' +
+      'this page used to ship scored worse out of sample than a flat 0.25 (1.8219 against 1.7672 mean absolute error ' +
+      'in log space); the fitted power law scores 1.6379.';
   }
 
   // ------------------------------------------------------------------ detail drawer
@@ -463,7 +445,7 @@
     var hit = null;
     ROWS.forEach(function (x) { if (x.r.slug === slug) hit = x; });
     if (!hit) return;
-    var r = hit.r, m = hit.m, peer = r.category ? D.ratios.categories[r.category] : undefined;
+    var r = hit.r, m = hit.m;
     clear(dialog);
 
     add(dialog, el('div', { class: 'd-head' },
@@ -496,51 +478,41 @@
       el('p', { class: 'hint', text: 'A null market cap means the snapshot records no token for this protocol, not that it has none. The implied value is what a token would be worth if the protocol\'s record held; it is not a forecast that one is issued.' })
     ));
 
-    // every term, its value, and what it contributed to the running product
-    var steps = [
-      { label: 'TVL', key: 'tvl_usd', value: usdExact(r.tvl_usd), factor: 1,
-        note: 'the snapshot figure the whole estimate is built on' },
-      { label: 'Category multiple', key: 'multiple', value: mult(m.multiple), factor: m.multiple,
-        note: (peer
-          ? 'winsorised median ' + peer.median.toFixed(4) + ' over ' + peer.n + ' live ' + r.category + ' protocol' + (peer.n === 1 ? '' : 's') + ' (raw median ' + peer.raw_median.toFixed(4) + '), shrunk toward the global ' + D.ratios.global_median.toFixed(4)
-          : 'no live peer in ' + (r.category || 'an unnamed category') + ': the global median ' + D.ratios.global_median.toFixed(4)) +
-          '; peers winsorised to [' + D.ratios.winsor_low.toFixed(4) + ', ' + D.ratios.winsor_high.toFixed(4) + '], multiple capped at ' + D.ratios.cap.toFixed(4) },
-      { label: 'Growth', key: 'growth', value: mult(m.growth), factor: m.growth,
-        note: '7d change ' + pct(r.change_7d) + ' clamped to ' + M.growth_floor + '–' + M.growth_cap + ', weighted ' + M.growth_weight },
-      { label: 'Maturity', key: 'maturity', value: mult(m.maturity), factor: m.maturity,
-        note: 'age ' + age(r.age_days) + ' of ' + M.maturity_days + ' days, floor ' + M.maturity_floor },
-      { label: 'Launch', key: 'launch', value: mult(m.launch), factor: m.launch,
-        note: r.is_derivative
-          ? 'derivative product: a wrapped, staked, bridged, exchange or versioned product of a token that already trades'
-          : 'launch candidate: no parent product, no exchange prefix, not a bridge or staking category' },
-      { label: 'Rarity', key: 'rarity', value: mult(m.rarity), factor: m.rarity,
-        note: 'TVL is ' + (r.tvl_usd / D.max_pre_token_tvl * 100).toFixed(1) + '% of the largest pre-token TVL in the snapshot (' + usd(D.max_pre_token_tvl) + '), so scarce TVL earns up to ' + M.rarity_weight }
-    ];
-    var running = r.tvl_usd;
-    var termRows = steps.map(function (t) {
-      running = running * t.factor;
-      return termRow(t.label, t.key, t.value, t.note, usd(running));
-    });
-    var terms = el('table', { class: 'terms' },
+    // the fit that priced this row, and the arithmetic that turned it into the implied value
+    var fit = lawOf(r);
+    var aTerm = el('table', { class: 'terms' },
       el('thead', null, el('tr', null,
         el('th', { scope: 'col', text: 'Term of the model, and where it comes from' }),
         el('th', { scope: 'col', class: 'v', text: 'Value' }),
         el('th', { scope: 'col', class: 'c', text: 'Running value' })
       )),
       el('tbody', null,
-        termRows,
+        termRow('Population', 'population', sectionLabel(r.section),
+          r.is_derivative
+            ? 'a wrapped, staked, bridged, exchange or versioned product of a token that already trades: priced by the derivative fit'
+            : 'no token on record and no parent product: priced by the non-derivative fit',
+          'n = ' + fit.n),
+        termRow('Intercept', 'a', fit.a.toFixed(4),
+          'fitted on the ' + fit.n + ' live ' + (r.is_derivative ? 'derivative' : 'non-derivative') +
+          ' protocols in this snapshot; R² in log space ' + fit.r2.toFixed(3) + '. No ridge penalty on a',
+          'e^' + fit.a.toFixed(3)),
+        termRow('Exponent', 'b', fit.b.toFixed(4),
+          'fitted alongside a, with a ridge penalty of ' + M.ridge_lambda + ' on b alone. b = ' + fit.b.toFixed(3) +
+          ' < 1, so market cap grows more slowly than TVL and the multiple falls as TVL rises',
+          mult(m.multiple)),
         el('tr', { class: 'total' },
           el('td', { class: 'lbl' }, el('b', { text: 'Implied value' }),
-            el('span', { class: 'k', text: 'max(1, round(product))' }),
-            el('span', { class: 'note', text: 'this page recomputes ' + usdExact(m.implied) + (m.agrees ? ': identical to board.json' : ': differs, the data is stale') })),
-          el('td', { class: 'v', text: '×' + m.multiple.toFixed(4) + ' × ' + m.growth.toFixed(4) + ' × ' + m.maturity.toFixed(4) + ' × ' + m.launch.toFixed(2) + ' × ' + m.rarity.toFixed(4) }),
+            el('span', { class: 'k', text: 'clamp(round(exp(a + b × log(tvl))), ' + M.value_floor + ', ' + usd(M.value_cap) + ')' }),
+            el('span', { class: 'note', text: 'exp(' + fit.a.toFixed(4) + ' + ' + fit.b.toFixed(4) + ' × log(' + usdExact(r.tvl_usd) + ')); this page computes ' + usdExact(m.implied) + (m.agrees ? ': identical to board.json' : ': differs, the data is stale') })),
+          el('td', { class: 'v', text: '×' + m.multiple.toFixed(4) + ' mcap/TVL' }),
           el('td', { class: 'c sig', text: usdExact(r.implied_value_usd) })
         )
       )
     );
     add(body, el('section', { class: 'd-sec' },
-      el('h3', null, 'How the value was built', el('small', { text: 'each term, what it did, and where it came from' })),
-      terms
+      el('h3', null, 'How the value was built', el('small', { text: 'the fitted law, and where this protocol sits on it' })),
+      aTerm,
+      el('p', { class: 'hint', text: 'Growth, age and chain count are on this page as context and are not in the score: each was tested and made held-out error worse. See the Model view.' })
     ));
 
     // the farm plan the board carries for this row

@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Launch Radar — model radar-3</title>
-<meta name="description" content="Pre-token DeFi protocols ranked by an implied value derived from the snapshot's own mcap/TVL ratios, launch candidates separated from products of tokens that already trade.">
+<title>Token Launch Radar — model radar-4</title>
+<meta name="description" content="Pre-token DeFi protocols ranked by a power law fitted on the snapshot's own live mcap and TVL: implied = exp(a + b log(tvl)), with launch candidates separated from products of tokens that already trade.">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -28,17 +28,18 @@
     <div class="lede-copy">
       <h2 id="lede-h">What a protocol with no token on record would be worth, if its record held</h2>
       <p>
-        Each protocol is priced at its TVL times the market-cap-to-TVL multiple its own category has
-        actually traded at, then adjusted for seven-day growth, how long it has run without a token, whether
-        it is a launch candidate or a wrapped/staked/bridged product of a token that already trades, and how
-        scarce pre-token TVL is. Every figure below comes from the sealed snapshot; nothing is hand-picked.
-        An implied value is an estimate, not a price and not a promise that a token is issued.
+        Each protocol is priced by a power law fitted on the protocols in this snapshot that already have a
+        token and a TVL: <span class="mono">market cap = exp(a + b × log(tvl))</span>, with a and b solved
+        from the snapshot at run time. Because b is below one, the market-cap-to-TVL multiple is not a
+        constant — it is about 2.1× at $1M of TVL and 0.03× at $1B — so a row is priced against protocols
+        its own size, not against one number applied to all of them.
       </p>
       <p>
         The board is split in two, each half ranked on its own: <b>launch candidates</b> — no token on
         record and no parent product — and <b>live-adjacent products</b>, the wrapped, staked, bridged,
-        exchange and versioned products of a token that already trades. A derivative product's
-        multi-billion TVL is not evidence of a launch, so it no longer competes for a launch rank.
+        exchange and versioned products of a token that already trades. Each section is priced by its own
+        fit, because a derivative product sits on a different curve. An implied value is an estimate, not a
+        price and not a promise that a token is issued.
       </p>
     </div>
     <div class="stats" id="stats" aria-label="Board at a glance"></div>
@@ -105,8 +106,9 @@
     <h2 class="panel-h">Live tokens — set aside, priced by the market</h2>
     <p class="caption">
       These protocols already record a token and a market cap, so their value is a fact rather than a model.
-      Their mcap/TVL ratios are also the only evidence the model learns from, which is why they are shown
-      here instead of being ranked against protocols still waiting on a launch.
+      Their mcap/TVL pairs are also the only evidence the model learns from — the power law is fitted on them,
+      in two populations — which is why they are shown here instead of being ranked against protocols still
+      waiting on a launch.
     </p>
     <div class="table-wrap">
       <table id="live">
@@ -128,46 +130,45 @@
 
   <section id="model-panel" role="tabpanel" aria-labelledby="tab-model" hidden>
     <div class="panel pad">
-      <h2 class="panel-h">The model, and every constant it uses</h2>
+      <h2 class="panel-h">The model: one power law, fitted on this snapshot's live protocols</h2>
       <p class="caption" id="model-lede"></p>
       <pre class="formula" id="formula"></pre>
       <div class="grid2">
         <div>
-          <h3>Constants</h3>
-          <table class="mini" id="constants"><tbody></tbody></table>
+          <h3>Fitted coefficients</h3>
+          <table class="mini" id="fits"><tbody></tbody></table>
         </div>
         <div>
-          <h3>How the multiple is learned</h3>
-          <p class="caption" id="multiple-note"></p>
+          <h3>Constants</h3>
+          <table class="mini" id="constants"><tbody></tbody></table>
         </div>
       </div>
     </div>
     <div class="panel pad">
-      <h2 class="panel-h">Category multiples, from the snapshot's live protocols</h2>
+      <h2 class="panel-h">The multiple the fit implies, by TVL</h2>
       <p class="caption">
-        Median mcap/TVL of every protocol in the category that records a market cap and TVL, winsorised
-        into [p10, p90] of the snapshot's whole live ratio distribution (the "Raw median" column is the
-        unclamped figure, for comparison), shrunk toward the global median with a pseudo-count of 8
-        (w = n / (n + 8)), then clamped to 0.02–the snapshot's p90. A category with no live peers simply
-        takes the global median. The last column is the multiple this page computes for that category,
-        and the board's rows must agree with it.
+        TVL does not buy market cap in proportion: the fitted exponent is below one, so the multiple falls
+        as a protocol gets larger. Read across a row to see what one dollar of TVL has actually been worth
+        at each size. Every figure is computed here from the fitted a and b alone — no row is hand-priced.
       </p>
       <div class="table-wrap">
-        <table id="categories">
+        <table id="ladder">
           <thead>
             <tr>
-              <th scope="col">Category</th>
-              <th scope="col" class="num">Live peers</th>
-              <th scope="col" class="num">Median mcap/TVL</th>
-              <th scope="col" class="num">Raw median</th>
-              <th scope="col" class="num">Shrink weight</th>
-              <th scope="col" class="num">Multiple used</th>
-              <th scope="col" class="num">On board</th>
+              <th scope="col">Population</th>
+              <th scope="col" class="num">n</th>
+              <th scope="col" class="num">a</th>
+              <th scope="col" class="num">b</th>
+              <th scope="col" class="num">at $1M TVL</th>
+              <th scope="col" class="num">at $10M</th>
+              <th scope="col" class="num">at $100M</th>
+              <th scope="col" class="num">at $1B</th>
             </tr>
           </thead>
-          <tbody id="category-rows"></tbody>
+          <tbody id="ladder-rows"></tbody>
         </table>
       </div>
+      <p class="caption" id="dropped-note"></p>
     </div>
   </section>
 </main>
