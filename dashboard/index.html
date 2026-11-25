@@ -3,178 +3,187 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Launch Radar — model radar-4</title>
-<meta name="description" content="Pre-token DeFi protocols ranked by a power law fitted on the snapshot's own live mcap and TVL: implied = exp(a + b log(tvl)), with launch candidates separated from products of tokens that already trade.">
+<title>Token Launch Radar — model radar-5</title>
+<meta name="description" content="Pre-token DeFi protocols ranked by a law fitted on the snapshot's own live market caps: implied = exp(a + b log(tvl) + c growth + d log(age)), with launch candidates separated from products of tokens that already trade.">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <a class="skip" href="#board-panel">Skip to the board</a>
-
 <header class="top">
-  <div class="wrap top-in">
-    <div class="brand">
-      <span class="rings" aria-hidden="true"><i></i><i></i><i></i><b></b></span>
-      <div>
-        <p class="kicker">make.fun · token-radar-01</p>
-        <h1>Token Launch Radar</h1>
-      </div>
-    </div>
-    <dl class="meta" id="meta" aria-label="Snapshot and model"></dl>
+ <div class="wrap top-in">
+  <div class="brand">
+   <span class="rings" aria-hidden="true"><i></i><i></i><i></i><b></b></span>
+   <div>
+    <p class="kicker">make.fun · token-radar-01</p>
+    <h1>Token Launch Radar</h1>
+   </div>
   </div>
+  <dl class="meta" id="meta" aria-label="Snapshot and model"></dl>
+ </div>
 </header>
-
 <main class="wrap" id="main">
-  <section class="lede" aria-labelledby="lede-h">
-    <div class="lede-copy">
-      <h2 id="lede-h">What a protocol with no token on record would be worth, if its record held</h2>
-      <p>
-        Each protocol is priced by a power law fitted on the protocols in this snapshot that already have a
-        token and a TVL: <span class="mono">market cap = exp(a + b × log(tvl))</span>, with a and b solved
-        from the snapshot at run time. Because b is below one, the market-cap-to-TVL multiple is not a
-        constant — it is about 2.1× at $1M of TVL and 0.03× at $1B — so a row is priced against protocols
-        its own size, not against one number applied to all of them.
-      </p>
-      <p>
-        The board is split in two, each half ranked on its own: <b>launch candidates</b> — no token on
-        record and no parent product — and <b>live-adjacent products</b>, the wrapped, staked, bridged,
-        exchange and versioned products of a token that already trades. Each section is priced by its own
-        fit, because a derivative product sits on a different curve. An implied value is an estimate, not a
-        price and not a promise that a token is issued.
-      </p>
-    </div>
-    <div class="stats" id="stats" aria-label="Board at a glance"></div>
-  </section>
-
-  <section class="controls" aria-label="Search and filters">
-    <div class="field grow">
-      <label for="q">Search</label>
-      <input id="q" type="search" placeholder="name, slug, category or chain" autocomplete="off" spellcheck="false">
-    </div>
-    <div class="field">
-      <label for="f-category">Category</label>
-      <select id="f-category"><option value="all">All categories</option></select>
-    </div>
-    <div class="field">
-      <label for="f-chain">Chain</label>
-      <select id="f-chain"><option value="all">All chains</option></select>
-    </div>
-    <div class="field">
-      <label for="f-kind">Kind</label>
-      <select id="f-kind">
-        <option value="all">Launch candidates and derivatives</option>
-        <option value="launch">Launch candidates only</option>
-        <option value="derivative">Derivative products only</option>
-      </select>
-    </div>
-    <div class="field">
-      <span class="label">View</span>
-      <div class="tabs" role="tablist" aria-label="Views">
-        <button type="button" role="tab" id="tab-board" aria-selected="true" aria-controls="board-panel">Board</button>
-        <button type="button" role="tab" id="tab-live" aria-selected="false" aria-controls="live-panel">Live tokens</button>
-        <button type="button" role="tab" id="tab-model" aria-selected="false" aria-controls="model-panel">Model</button>
-      </div>
-    </div>
-    <p class="count" id="count" aria-live="polite"></p>
-  </section>
-
-  <section id="board-panel" class="panel" role="tabpanel" aria-labelledby="tab-board">
-    <div class="sections" id="sections" role="tablist" aria-label="Board sections"></div>
-    <p class="section-note" id="section-note"></p>
-    <div class="table-wrap">
-      <table id="board">
-        <caption class="caption" id="board-caption">Two ranked sections: launch candidates, then live-adjacent products of a token that already trades. Ranks run 1..n inside each section. Select a row for its model terms and farm plan.</caption>
-        <thead>
-          <tr>
-            <th scope="col" class="sortable" data-key="rank" aria-sort="ascending" title="rank inside the row's own section (1..n); the row's whole-board rank is shown in its detail view"><button type="button">Rank</button></th>
-            <th scope="col" class="sortable" data-key="name"><button type="button">Protocol</button></th>
-            <th scope="col" class="sortable" data-key="category"><button type="button">Category</button></th>
-            <th scope="col" class="sortable" data-key="chains"><button type="button">Chains</button></th>
-            <th scope="col" class="sortable num" data-key="tvl"><button type="button">TVL</button></th>
-            <th scope="col" class="sortable num" data-key="change"><button type="button">7d</button></th>
-            <th scope="col" class="sortable num" data-key="multiple"><button type="button">× mcap/TVL</button></th>
-            <th scope="col" class="sortable num" data-key="implied"><button type="button">Implied value</button></th>
-            <th scope="col" class="sortable" data-key="kind"><button type="button">Kind</button></th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </div>
-    <p class="foot" id="board-foot"></p>
-  </section>
-
-  <section id="live-panel" class="panel" role="tabpanel" aria-labelledby="tab-live" hidden>
-    <h2 class="panel-h">Live tokens — set aside, priced by the market</h2>
-    <p class="caption">
-      These protocols already record a token and a market cap, so their value is a fact rather than a model.
-      Their mcap/TVL pairs are also the only evidence the model learns from — the power law is fitted on them,
-      in two populations — which is why they are shown here instead of being ranked against protocols still
-      waiting on a launch.
-    </p>
-    <div class="table-wrap">
-      <table id="live">
-        <thead>
-          <tr>
-            <th scope="col">Protocol</th>
-            <th scope="col">Category</th>
-            <th scope="col">Chains</th>
-            <th scope="col" class="num">TVL</th>
-            <th scope="col" class="num">7d</th>
-            <th scope="col" class="num">Market cap</th>
-            <th scope="col" class="num">mcap/TVL</th>
-          </tr>
-        </thead>
-        <tbody id="live-rows"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section id="model-panel" role="tabpanel" aria-labelledby="tab-model" hidden>
-    <div class="panel pad">
-      <h2 class="panel-h">The model: one power law, fitted on this snapshot's live protocols</h2>
-      <p class="caption" id="model-lede"></p>
-      <pre class="formula" id="formula"></pre>
-      <div class="grid2">
-        <div>
-          <h3>Fitted coefficients</h3>
-          <table class="mini" id="fits"><tbody></tbody></table>
-        </div>
-        <div>
-          <h3>Constants</h3>
-          <table class="mini" id="constants"><tbody></tbody></table>
-        </div>
-      </div>
-    </div>
-    <div class="panel pad">
-      <h2 class="panel-h">The multiple the fit implies, by TVL</h2>
-      <p class="caption">
-        TVL does not buy market cap in proportion: the fitted exponent is below one, so the multiple falls
-        as a protocol gets larger. Read across a row to see what one dollar of TVL has actually been worth
-        at each size. Every figure is computed here from the fitted a and b alone — no row is hand-priced.
-      </p>
-      <div class="table-wrap">
-        <table id="ladder">
-          <thead>
-            <tr>
-              <th scope="col">Population</th>
-              <th scope="col" class="num">n</th>
-              <th scope="col" class="num">a</th>
-              <th scope="col" class="num">b</th>
-              <th scope="col" class="num">at $1M TVL</th>
-              <th scope="col" class="num">at $10M</th>
-              <th scope="col" class="num">at $100M</th>
-              <th scope="col" class="num">at $1B</th>
-            </tr>
-          </thead>
-          <tbody id="ladder-rows"></tbody>
-        </table>
-      </div>
-      <p class="caption" id="dropped-note"></p>
-    </div>
-  </section>
+ <section class="lede" aria-labelledby="lede-h">
+  <div class="lede-copy">
+   <h2 id="lede-h">What a protocol with no token on record would be worth, if its record held</h2>
+   <p>
+    Each protocol is priced from the three figures the brief names — its TVL, its seven-day growth and how
+    long it has run with no token — by a law fitted on the protocols in this snapshot that already have a
+    token and a TVL: <span class="mono">mcap = exp(a + b × log(tvl) + c × growth + d × log(age))</span>,
+    every coefficient solved from the snapshot at run time. Because b is below one, the market-cap-to-TVL
+    multiple is not a constant, so a row is priced against protocols its own size and its own trajectory,
+    not against one number applied to all of them.
+   </p>
+   <p>
+    The board carries every pre-token protocol the snapshot records, split in two and each half ranked on
+    its own: <b>launch candidates</b> — no token on record and no parent product — and <b>live-adjacent
+    products</b>, the wrapped, staked, bridged, exchange and versioned products of a token that already
+    trades. Each section is priced by its own fit. An implied value is an estimate, not a price and not a
+    promise that a token is issued.
+   </p>
+  </div>
+  <div class="stats" id="stats" aria-label="Board at a glance"></div>
+ </section>
+ <section class="controls" aria-label="Search and filters">
+  <div class="field grow">
+   <label for="q">Search</label>
+   <input id="q" type="search" placeholder="name, slug, category or chain" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="field">
+   <label for="f-category">Category</label>
+   <select id="f-category"><option value="all">All categories</option></select>
+  </div>
+  <div class="field">
+   <label for="f-chain">Chain</label>
+   <select id="f-chain"><option value="all">All chains</option></select>
+  </div>
+  <div class="field">
+   <label for="f-kind">Kind</label>
+   <select id="f-kind">
+    <option value="all">Launch candidates and derivatives</option>
+    <option value="launch">Launch candidates only</option>
+    <option value="derivative">Derivative products only</option>
+   </select>
+  </div>
+  <div class="field">
+   <span class="label">View</span>
+   <div class="tabs" role="tablist" aria-label="Views">
+    <button type="button" role="tab" id="tab-board" aria-selected="true" aria-controls="board-panel">Board</button>
+    <button type="button" role="tab" id="tab-live" aria-selected="false" aria-controls="live-panel">Live tokens</button>
+    <button type="button" role="tab" id="tab-model" aria-selected="false" aria-controls="model-panel">Model</button>
+   </div>
+  </div>
+  <p class="count" id="count" aria-live="polite"></p>
+ </section>
+ <section id="board-panel" class="panel" role="tabpanel" aria-labelledby="tab-board">
+  <div class="sections" id="sections" role="tablist" aria-label="Board sections"></div>
+  <p class="section-note" id="section-note"></p>
+  <div class="table-wrap">
+   <table id="board">
+    <caption class="caption" id="board-caption">Two ranked sections: launch candidates, then live-adjacent products of a token that already trades. Ranks run 1..n inside each section. Select a row for its model terms and farm plan.</caption>
+    <thead>
+     <tr>
+      <th scope="col" class="sortable" data-key="rank" aria-sort="ascending" title="rank inside the row's own section (1..n)"><button type="button">Rank</button></th>
+      <th scope="col" class="sortable" data-key="name"><button type="button">Protocol</button></th>
+      <th scope="col" class="sortable" data-key="category"><button type="button">Category</button></th>
+      <th scope="col" class="sortable" data-key="chains"><button type="button">Chains</button></th>
+      <th scope="col" class="sortable num" data-key="tvl"><button type="button">TVL</button></th>
+      <th scope="col" class="sortable num" data-key="change"><button type="button">7d</button></th>
+      <th scope="col" class="sortable num" data-key="multiple"><button type="button">× mcap/TVL</button></th>
+      <th scope="col" class="sortable num" data-key="implied"><button type="button">Implied value</button></th>
+      <th scope="col" class="sortable" data-key="kind"><button type="button">Kind</button></th>
+     </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+   </table>
+  </div>
+  <p class="foot" id="board-foot"></p>
+ </section>
+ <section id="live-panel" class="panel" role="tabpanel" aria-labelledby="tab-live" hidden>
+  <h2 class="panel-h">Live tokens — set aside, priced by the market</h2>
+  <p class="caption">
+   These protocols already record a token and a market cap, so their value is a fact rather than a model.
+   Their mcap/TVL pairs are also the only evidence the model learns from — the power law is fitted on them,
+   in two populations — which is why they are shown here instead of being ranked against protocols still
+   waiting on a launch.
+  </p>
+  <div class="table-wrap">
+   <table id="live">
+    <thead>
+     <tr>
+      <th scope="col">Protocol</th>
+      <th scope="col">Category</th>
+      <th scope="col">Chains</th>
+      <th scope="col" class="num">TVL</th>
+      <th scope="col" class="num">7d</th>
+      <th scope="col" class="num">Market cap</th>
+      <th scope="col" class="num">mcap/TVL</th>
+     </tr>
+    </thead>
+    <tbody id="live-rows"></tbody>
+   </table>
+  </div>
+ </section>
+ <section id="model-panel" role="tabpanel" aria-labelledby="tab-model" hidden>
+  <div class="panel pad">
+   <h2 class="panel-h">The model: one fitted law per population, on the three figures the brief names</h2>
+   <p class="caption" id="model-lede"></p>
+   <pre class="formula" id="formula"></pre>
+   <h3>Fitted coefficients</h3>
+   <table class="mini" id="fits"><tbody></tbody></table>
+  </div>
+  <div class="panel pad">
+   <h2 class="panel-h">Held out: what the terms cost out of sample</h2>
+   <p class="caption">
+    The same snapshot, split five ways: each fold is held out in turn, the law is fitted on the rest,
+    and the error is measured on the rows it never saw. The full law is set against a TVL-only law on
+    identical folds and rows. This is the number that decides whether a term earns its place, so it is
+    printed rather than claimed — including where it says a term does not.
+   </p>
+   <div class="table-wrap">
+    <table id="held">
+     <thead>
+      <tr>
+       <th scope="col">Population</th>
+       <th scope="col" class="num">Full law (MAE, log)</th>
+       <th scope="col" class="num">TVL alone (MAE, log)</th>
+       <th scope="col" class="num">Difference</th>
+       <th scope="col">Read</th>
+      </tr>
+     </thead>
+     <tbody id="held-rows"></tbody>
+    </table>
+   </div>
+  </div>
+  <div class="panel pad">
+   <h2 class="panel-h">The multiple the fit implies, by TVL</h2>
+   <p class="caption">
+    TVL does not buy market cap in proportion: the fitted exponent is below one, so the multiple falls
+    as a protocol gets larger. Read across a row to see what one dollar of TVL has actually been worth
+    at each size, with the growth and age terms held at their population averages. Every figure is
+    computed here from the fitted a, b, c and d alone — no row is hand-priced.
+   </p>
+   <div class="table-wrap">
+    <table id="ladder">
+     <thead>
+      <tr>
+       <th scope="col">Population</th>
+       <th scope="col" class="num">n</th>
+       <th scope="col" class="num">a</th>
+       <th scope="col" class="num">b</th>
+       <th scope="col" class="num">at $1M TVL</th>
+       <th scope="col" class="num">at $10M</th>
+       <th scope="col" class="num">at $100M</th>
+       <th scope="col" class="num">at $1B</th>
+      </tr>
+     </thead>
+     <tbody id="ladder-rows"></tbody>
+    </table>
+   </div>
+   <p class="caption" id="dropped-note"></p>
+  </div>
+ </section>
 </main>
-
 <dialog id="detail" aria-labelledby="d-title"></dialog>
-
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>

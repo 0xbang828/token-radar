@@ -1,5 +1,4 @@
-/* Token Launch Radar — one palette, one spacing scale, one type scale. No external font, no image,
-   no framework: system stacks only, so the page renders the same on the grader's machine. */
+/* Token Launch Radar — one palette, one spacing scale, one type scale. No external font, no image, no framework: system stacks only, so the page renders the same everywhere. */
 :root {
   /* palette: warm paper, ink, deep teal accent, ochre for derivative products */
   --paper: #f6f4ef;
@@ -16,14 +15,11 @@
   --ochre-soft: #f6ecda;
   --red: #a63528;
   --red-soft: #f8e5e1;
-
   /* spacing scale, 4px base */
   --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
   --s5: 24px; --s6: 32px; --s7: 48px; --s8: 64px;
-
   /* radii */
   --r1: 4px; --r2: 8px; --r3: 14px;
-
   /* type */
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -35,7 +31,6 @@
   --fs-h1: 27px;
   --fs-big: 30px;
 }
-
 * { box-sizing: border-box; }
 html { color-scheme: light; -webkit-text-size-adjust: 100%; }
 body {
@@ -59,7 +54,6 @@ button { cursor: pointer; background: none; border: 0; }
   background: var(--surface); border: 1px solid var(--line-strong); z-index: 40;
 }
 .skip:focus { left: var(--s4); top: var(--s4); }
-
 /* ---------------------------------------------------------------- header */
 .top {
   background: var(--surface);
@@ -85,7 +79,6 @@ button { cursor: pointer; background: none; border: 0; }
 .rings i:nth-child(2) { width: 26px; height: 26px; opacity: 0.4; }
 .rings i:nth-child(3) { width: 13px; height: 13px; opacity: 0.7; }
 .rings b { width: 5px; height: 5px; background: var(--teal); border: 0; }
-
 .meta { display: flex; flex-wrap: wrap; gap: var(--s5) var(--s6); margin: 0; }
 .meta div { display: grid; gap: 3px; }
 .meta dt {
@@ -94,7 +87,6 @@ button { cursor: pointer; background: none; border: 0; }
 }
 .meta dd { margin: 0; font: 500 14px/1.2 var(--mono); color: var(--ink); }
 .meta dd.em { color: var(--teal); }
-
 /* ---------------------------------------------------------------- lede */
 .lede {
   display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 0.85fr);
@@ -109,7 +101,6 @@ button { cursor: pointer; background: none; border: 0; }
 .stat span { font-size: var(--fs-micro); letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
 .stat.wide { grid-column: span 2; }
 .stat.wide b { font-size: 15px; font-weight: 500; }
-
 /* ---------------------------------------------------------------- controls */
 .controls {
   display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s3);
@@ -142,7 +133,6 @@ button { cursor: pointer; background: none; border: 0; }
   color: var(--ink-2); white-space: nowrap;
 }
 .count b { color: var(--teal); font-weight: 600; }
-
 /* ---------------------------------------------------------------- board sections */
 .sections { display: flex; flex-wrap: wrap; gap: 2px; padding: var(--s3) var(--s4) 0; border-bottom: 1px solid var(--line); }
 .sec-tab {
@@ -164,7 +154,6 @@ tbody tr.divider[data-divider="live-adjacent"] .divider-in { border-left-color: 
 .divider-n { font: 500 var(--fs-micro)/1.2 var(--mono); color: var(--teal); }
 tbody tr.divider[data-divider="live-adjacent"] .divider-n { color: var(--ochre); }
 .divider-hint { font-size: var(--fs-small); color: var(--muted); }
-
 /* ---------------------------------------------------------------- tables */
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r3); overflow: hidden; }
 .panel + .panel { margin-top: var(--s4); }
@@ -241,7 +230,6 @@ tbody tr:last-child td { border-bottom: 0; }
 .btn:hover { border-color: var(--teal); color: var(--teal); }
 .btn.primary { background: var(--teal); border-color: var(--teal); color: #fffdf8; }
 .btn.primary:hover { background: #0a5045; color: #fffdf8; }
-
 /* ---------------------------------------------------------------- model view */
 .formula {
   margin: 0; padding: var(--s4); overflow-x: auto;
@@ -258,7 +246,6 @@ table.mini td:last-child { text-align: right; font-family: var(--mono); }
 table.mini tr:last-child td { border-bottom: 0; }
 #ladder td.num, #live td.num { font-family: var(--mono); }
 #ladder td.num b { font-weight: 600; }
-
 /* ---------------------------------------------------------------- detail drawer */
 dialog#detail {
   position: fixed; inset: 0 0 0 auto; margin: 0; height: 100%; max-height: 100%;
@@ -317,7 +304,6 @@ dialog#detail::backdrop { background: rgba(23, 28, 26, 0.34); }
 .plan p { font-size: var(--fs-small); }
 .plan .cost { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); margin-top: 5px; color: var(--muted); font: 400 var(--fs-micro)/1.4 var(--mono); }
 .plan .cost b { color: var(--ink-2); font-weight: 600; }
-
 @media (max-width: 1000px) {
   .wrap { padding: 0 var(--s4); }
   .lede { grid-template-columns: 1fr; gap: var(--s5); }

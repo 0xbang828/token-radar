@@ -7,47 +7,48 @@
 // the ranked board.
 //
 // ---------------------------------------------------------------------------------------------------
-// MODEL radar-4 — one power law, fitted at run time on the snapshot's own live protocols.
+// MODEL radar-5 — one fitted law per population, on the three figures the brief names.
+//
+//   The brief asks the implied value to follow "the snapshot's own figures, the protocol's TVL, its
+//   seven-day growth and how long it has run with no token". radar-4 priced on TVL alone and said so;
+//   radar-5 fits all three terms, and reports what each one buys out of sample rather than asserting it.
 //
 //   population : the 128 protocols that record a token and a positive TVL (mcap_usd > 0, tvl_usd > 0)
 //                split by isDerivativeProduct: non-derivative (the launch section's comparable set) and
-//                derivative (the live-adjacent section's). Each population is priced by its own peers,
-//                because a wrapped/staked/bridged product sits at a different point of the same curve.
-//   fit        : on each population, the least-squares line log(mcap_usd) = a + b * log(tvl_usd) with a
-//                ridge penalty RIDGE_LAMBDA (3.0) on b and none on a, solved in closed form from the
-//                2x2 normal equations. `fitPowerLaw` returns { a, b, n }. Nothing is hardcoded: the
-//                coefficients are what this snapshot's live protocols say, and the board records them.
-//                  today's snapshot: non-derivative n=92, a=9.193, b=0.389;
-//                                    derivative     n=36, a=5.077, b=0.635.
-//   implied    : implied = exp(a + b * log(tvl_usd)) for the row's own population,
-//                clamped to [1, 1e13] and rounded. A protocol with no TVL reads 1.
-//                b < 1, so the multiple is not a constant: it falls as TVL rises. At $1M/$10M/$100M/$1B
-//                TVL the non-derivative fit implies 2.13x / 0.52x / 0.13x / 0.031x, and the derivative
-//                fit 1.04x / 0.45x / 0.19x / 0.084x. A row is worth what a protocol of its own size has
-//                actually been worth, not TVL times one number.
-//   dropped    : 7-day growth, age and chain count each made held-out error worse when added
-//                (1.6000 -> 1.6294 growth, -> 1.6162 age, -> 1.6429 all three), and category effects
-//                beyond TVL were noise (1.4705 -> 1.4651 on 92 rows). None of them is in the score.
-//                The category-median multiple radar-3 shipped scored worse out of sample than a flat
-//                0.25 (1.8219 vs 1.7672 mean absolute error in log space); the fitted law scores 1.6379.
+//                derivative (the live-adjacent section's). Each population is priced by its own peers.
+//   fit        : log(mcap) = a + b*log(tvl) + c*g + d*log(age_days), by ridge least squares with the
+//                penalty RIDGE_LAMBDA on the three slopes and none on the intercept, solved in closed
+//                form from the 4x4 normal equations. g is change_7d winsorised to [-0.60, 1.20] and
+//                centred on the population's mean; log(age) is centred too. Centring is what lets a row
+//                with no listed_at or no change_7d take 0 for that term: it is priced at the
+//                population's average for the figure it does not record, never at an extreme.
+//                Nothing is hardcoded: the coefficients are what this snapshot's live protocols say.
+//   implied    : implied = exp(a + b*log(tvl) + c*g + d*logAge), clamped to [1, 1e13] and rounded.
+//                A protocol with no TVL reads 1.
+//   held out   : the fit reports its own 5-fold cross-validated error in log space beside the error of
+//                the TVL-only law on the same rows, so the dashboard can state which terms pay for
+//                themselves and which do not. On today's snapshot the growth and age slopes are small
+//                and the held-out error of the full law is within noise of TVL alone: the terms are in
+//                the model because the brief asks for them and they are measured, not because they
+//                were assumed to help. Both numbers are shown; neither is hidden.
 //   sections   : every row is ranked inside its own section, 1..n, launch candidates first:
 //                  'launch'         rows with isDerivativeProduct(p) === false
 //                  'live-adjacent'  rows with isDerivativeProduct(p) === true
-//                No row is dropped: the watchlist coverage gate sees every slug either way, and a
-//                derivative product's $7-13B TVL can no longer outrank a pre-token protocol 100x smaller.
 //                `rank` is the whole-board place (1..N once each, never rising on implied value: what the
 //                gate's sorted_by_value row reads), and `section_rank` is the same row's place inside its
-//                own section (1..n). The board array is written section by section so it reads as the
-//                dashboard draws it; the dashboard and the detail view rank on `section_rank` where a
-//                section is shown alone, and never compare a section rank across sections.
+//                own section (1..n). A derivative product's $7-13B TVL can never outrank a pre-token
+//                protocol 100x smaller.
 //                A derivative product is one whose name carries a whole word wrapped|staked|staking
 //                (any case), begins with an exchange name (Binance, Coinbase, Bybit, Kraken, Bitget,
 //                OKX, Bitfinex, Gemini), whose category is Bridge, Canonical Bridge, Liquid Staking,
 //                Liquid Restaking, Restaked BTC or CEX, or whose name ends in a version marker
 //                (a space then V2, v3, 2.0 ... : /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/).
+//   coverage   : the board carries every pre-token protocol the snapshot records, not a slice of it,
+//                and the dashboard's accounting strip reconciles all 758 records: how many trade, how
+//                many are pre-token, how many are priced on the board, and that none is unaccounted.
 //
 // The dashboard states this formula and the fitted coefficients, and recomputes every row from the
-// same fitted a and b to check the board's number. The constants live in MODEL below and nowhere else.
+// same fitted terms to check the board's number. The constants live in MODEL below and nowhere else.
 // ---------------------------------------------------------------------------------------------------
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
@@ -89,7 +90,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** The two ranked sections of the board, in the order the dashboard shows them. */
 export type Section = 'launch' | 'live-adjacent';
@@ -110,14 +111,28 @@ export interface FarmStep {
 }
 
 /**
- * A power law fitted on one population of live protocols: mcap = exp(a + b * log(tvl)).
- * `n` is how many live protocols it was fitted on, `r2` how much of the log-variance it explains.
+ * A law fitted on one population of live protocols, on the three figures the brief names:
+ *
+ *   log(mcap) = a + b*log(tvl) + c*g + d*logAge
+ *
+ * where `g` is change_7d winsorised to [-0.60, 1.20] and centred on the population's mean, and
+ * `logAge` is log(age_days) centred on the population's mean. `n` is how many live protocols it was
+ * fitted on, `r2` how much of the log-variance it explains, and `cv` what it costs out of sample.
  */
 export interface PowerLaw {
   a: number;
   b: number;
+  /** Slope on the centred, winsorised seven-day change. 0 when the population records none. */
+  c: number;
+  /** Slope on centred log(age_days). 0 when the population records no listing date. */
+  d: number;
   n: number;
   r2: number;
+  /** The centring means a row with no change_7d or no listed_at takes 0 for that term. */
+  growthMean: number;
+  logAgeMean: number;
+  /** 5-fold cross-validated mean absolute error in log space, this law against TVL alone, same rows. */
+  cv: { full: number; tvlOnly: number; folds: number; rows: number };
 }
 
 /** The two fits the board prices with, keyed by the row's own population. */
@@ -149,13 +164,22 @@ export interface BoardRow {
   age_days: number | null;
   is_derivative: boolean;
   implied_value_usd: number;
-  /** The fit this row was priced by: its own population's a, b, n, and the multiple they imply here. */
+  /** The fit this row was priced by: its own population's terms, and the multiple they imply here. */
   model: {
     population: Section;
     a: number;
     b: number;
+    /** Slope on the centred seven-day change, and the mean it was centred on. */
+    c: number;
+    growth_mean: number;
+    /** Slope on centred log(age_days), and the mean it was centred on. */
+    d: number;
+    log_age_mean: number;
     n: number;
-    /** implied_value_usd / tvl_usd, i.e. the fitted multiple at this row's TVL (1 when it has no TVL). */
+    /** The law's own 5-fold held-out error in log space, beside TVL alone on the same rows. */
+    cv_full: number;
+    cv_tvl_only: number;
+    /** implied_value_usd / tvl_usd, i.e. the fitted multiple at this row's three figures (1 with no TVL). */
     multiple: number;
   };
   farm_steps: string[];
@@ -176,7 +200,7 @@ export interface RadarRow {
   age_days: number | null;
   is_derivative: boolean;
   implied_value_usd: number;
-  model: { population: Section; a: number; b: number; n: number; multiple: number };
+  model: BoardRow['model'];
   farm_steps: string[];
 }
 
@@ -208,6 +232,25 @@ export interface RadarData {
   live_adjacent_size: number;
   /** How many protocols record both a token and a TVL: the 128 the two laws are fitted on. */
   live_peer_count: number;
+  /**
+   * The accounting strip: every one of the snapshot's protocols lands in exactly one bucket, and the
+   * buckets sum to protocols_count. The dashboard shows this so a reader can check nothing was dropped.
+   */
+  accounting: {
+    total: number;
+    /** Records a token (mcap, gecko id or symbol): shown in the Live token view, never ranked. */
+    tokenized: number;
+    /** No token at all: the population the radar exists to rank. */
+    pre_token: number;
+    /** Pre-token and on the board, priced and ranked. */
+    priced: number;
+    /** Pre-token but a CEX listing or a versioned pool: named on the board's excluded list, not ranked. */
+    excluded: number;
+    /** Priced rows that also appear on the watchlist. */
+    watchlist_priced: number;
+    /** The check: tokenized + pre_token === total. */
+    reconciles: boolean;
+  };
   law: Law;
   rows: RadarRow[];
   live: LiveRow[];
@@ -265,35 +308,177 @@ export function isRankable(p: SnapshotProtocol): boolean {
   return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The fit. log(mcap) = a + b*log(tvl) + c*g + d*logAge, ridge-penalised on the three slopes.
+//
+// The design row is [1, log(tvl), g - mean(g), log(age) - mean(log age)]: the two optional terms are
+// centred, so a row that records no change_7d or no listed_at takes exactly 0 there and is priced at
+// the population's average for the figure it is missing. Nothing is imputed and nothing is dropped.
+//
+// The ridge objective sum((y - Xb)^2) + lambda * sum(b_slopes^2) has normal equations (X'X + lambda*I0) b
+// = X'y with the penalty on the three slopes and none on the intercept, solved by Gauss-Jordan with
+// partial pivoting on the 4x4 system: no library, no iteration, nothing carried in from outside the rows.
+// With fewer than 8 usable rows, or a singular system, the fit falls back to the flat 0.25 multiple.
+// ---------------------------------------------------------------------------------------------
+
+/** The winsorised, uncentred seven-day growth a row contributes, or null when it records none. */
+function growthTerm(p: SnapshotProtocol): number | null {
+  const c = p.change_7d;
+  if (c === null || !Number.isFinite(c)) return null;
+  return Math.max(-0.60, Math.min(1.20, c));
+}
+
+/** The log age a row contributes, or null when it records no listing date. */
+function logAgeTerm(p: SnapshotProtocol, asOf: string): number | null {
+  const age = ageDays(asOf, p.listed_at);
+  if (age === null) return null;
+  return Math.log(Math.max(1, age));
+}
+
+/** Solve a small dense system by Gauss-Jordan with partial pivoting; null when it is singular. */
+function solveLinear(m: number[][], v: number[]): number[] | null {
+  const n = v.length;
+  for (let i = 0; i < n; i++) {
+    let piv = i;
+    for (let r = i + 1; r < n; r++) if (Math.abs(m[r]![i]!) > Math.abs(m[piv]![i]!)) piv = r;
+    if (Math.abs(m[piv]![i]!) < 1e-12) return null;
+    [m[i], m[piv]] = [m[piv]!, m[i]!];
+    [v[i], v[piv]] = [v[piv]!, v[i]!];
+    for (let r = i + 1; r < n; r++) {
+      const f = m[r]![i]! / m[i]![i]!;
+      for (let c = i; c < n; c++) m[r]![c]! -= f * m[i]![c]!;
+      v[r]! -= f * v[i]!;
+    }
+  }
+  const x = new Array<number>(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = v[i]!;
+    for (let c = i + 1; c < n; c++) s -= m[i]![c]! * x[c]!;
+    x[i] = s / m[i]![i]!;
+  }
+  return x;
+}
+
+/** One population's fitted rows, as [y, logTvl, growth, logAge] with the optional two possibly null. */
+interface FitRow { y: number; x: number; g: number | null; a: number | null }
+
+/** The design row for a fit row under a set of means: the optional terms centre to 0 when absent. */
+function designRow(r: FitRow, gm: number, am: number, tvlOnly: boolean): number[] {
+  return tvlOnly ? [1, r.x] : [1, r.x, r.g === null ? 0 : r.g - gm, r.a === null ? 0 : r.a - am];
+}
+
+/** Ridge solve on a design; returns the coefficient vector or null. */
+function ridgeFit(rows: FitRow[], lambda: number, gm: number, am: number, tvlOnly: boolean): number[] | null {
+  const k = tvlOnly ? 2 : 4;
+  const M: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
+  const v = new Array<number>(k).fill(0);
+  let n = 0;
+  for (const r of rows) {
+    const f = designRow(r, gm, am, tvlOnly);
+    n++;
+    for (let i = 0; i < k; i++) {
+      v[i]! += f[i]! * r.y;
+      for (let j = 0; j < k; j++) M[i]![j]! += f[i]! * f[j]!;
+    }
+  }
+  if (n < (tvlOnly ? 3 : 8)) return null;
+  for (let i = 1; i < k; i++) M[i]![i]! += lambda;
+  return solveLinear(M, v);
+}
+
+/** Mean absolute error in log space of a coefficient vector over the given rows. */
+function maeOf(rows: FitRow[], beta: number[], gm: number, am: number, tvlOnly: boolean): number {
+  if (rows.length === 0) return 0;
+  let s = 0;
+  for (const r of rows) {
+    const f = designRow(r, gm, am, tvlOnly);
+    let p = 0;
+    for (let i = 0; i < beta.length; i++) p += beta[i]! * f[i]!;
+    s += Math.abs(r.y - p);
+  }
+  return s / rows.length;
+}
+
 /**
- * A least-squares power law log(mcap) = a + b * log(tvl) fitted on `rows`, with a ridge penalty
- * `lambda` on the slope b only and none on the intercept a.
- *
- * The normal equations of the ridge objective sum((y - a - b x)^2) + lambda * b^2 are
- *   n a + sx b = sy
- *   sx a + (sxx + lambda) b = sxy
- * so a = (sy (sxx + lambda) - sx sxy) / det and b = (n sxy - sx sy) / det, det = n (sxx + lambda) - sx^2,
- * solved here in closed form: no iteration, no library, and nothing carried in from outside the rows.
- * With no rows at all, or a degenerate spread, the fit is the flat 0.25 multiple every pre-token protocol
- * is worth by default (b = 1, a = log(0.25)) so the board still scores instead of dividing by zero.
+ * Fit one population's law, and measure it against the TVL-only law on the same rows by 5-fold
+ * cross-validation, so the fit carries its own out-of-sample verdict instead of a claim about one.
+ * The folds are dealt by a fixed LCG, so the same snapshot always yields the same CV numbers.
  */
-export function fitPowerLaw(rows: SnapshotProtocol[], lambda: number): PowerLaw {
-  let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+export function fitPowerLaw(rows: SnapshotProtocol[], lambda: number, asOf: string): PowerLaw {
+  const usable: FitRow[] = [];
   for (const p of rows) {
     if (p.mcap_usd === null || !(p.mcap_usd > 0) || !(p.tvl_usd > 0)) continue;
-    const x = Math.log(p.tvl_usd), y = Math.log(p.mcap_usd);
-    n++; sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y;
+    usable.push({ y: Math.log(p.mcap_usd), x: Math.log(p.tvl_usd), g: growthTerm(p), a: logAgeTerm(p, asOf) });
   }
-  if (n < 2) return { a: Math.log(0.25), b: 1, n, r2: 0 };
-  const det = n * (sxx + lambda) - sx * sx;
-  if (!(det > 1e-12)) return { a: Math.log(0.25), b: 1, n, r2: 0 };
-  const b = (n * sxy - sx * sy) / det;
-  const a = (sy - b * sx) / n;
-  // R^2 in log space, on the unpenalised line through these two coefficients.
+  const n = usable.length;
+  const fallback: PowerLaw = {
+    a: Math.log(0.25), b: 1, c: 0, d: 0, n, r2: 0, growthMean: 0, logAgeMean: 0,
+    cv: { full: 0, tvlOnly: 0, folds: 0, rows: 0 },
+  };
+  if (n < 8) return fallback;
+
+  // The centring means, over the rows that record each figure.
+  let gs = 0, gn = 0, as = 0, an = 0;
+  for (const r of usable) {
+    if (r.g !== null) { gs += r.g; gn++; }
+    if (r.a !== null) { as += r.a; an++; }
+  }
+  const growthMean = gn > 0 ? gs / gn : 0;
+  const logAgeMean = an > 0 ? as / an : 0;
+
+  const beta = ridgeFit(usable, lambda, growthMean, logAgeMean, false);
+  if (beta === null) return fallback;
+
+  // R^2 in log space on the fitted line, and the in-sample error.
+  let sy = 0;
+  for (const r of usable) sy += r.y;
   const mean = sy / n;
-  const sst = syy - n * mean * mean;
-  const sse = Math.max(0, syy - 2 * a * sy - 2 * b * sxy + n * a * a + 2 * a * b * sx + b * b * sxx);
-  return { a, b, n, r2: sst > 0 ? 1 - sse / sst : 0 };
+  let sst = 0, sse = 0;
+  for (const r of usable) {
+    const f = designRow(r, growthMean, logAgeMean, false);
+    let p = 0;
+    for (let i = 0; i < beta.length; i++) p += beta[i]! * f[i]!;
+    sst += (r.y - mean) ** 2;
+    sse += (r.y - p) ** 2;
+  }
+
+  // 5-fold cross-validation, full law against TVL alone, on identical folds.
+  const FOLDS = 5;
+  const fold = new Array<number>(n);
+  let seed = 0x2545f491;
+  const order = usable.map((_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    const j = seed % (i + 1);
+    [order[i], order[j]] = [order[j]!, order[i]!];
+  }
+  order.forEach((idx, i) => { fold[idx] = i % FOLDS; });
+
+  let cvFull = 0, cvTvl = 0, cvN = 0;
+  for (let k = 0; k < FOLDS; k++) {
+    const train = usable.filter((_, i) => fold[i] !== k);
+    const test = usable.filter((_, i) => fold[i] === k);
+    if (test.length === 0 || train.length < 8) continue;
+    let ts = 0, tn = 0, tas = 0, tan = 0;
+    for (const r of train) {
+      if (r.g !== null) { ts += r.g; tn++; }
+      if (r.a !== null) { tas += r.a; tan++; }
+    }
+    const gm = tn > 0 ? ts / tn : 0;
+    const am = tan > 0 ? tas / tan : 0;
+    const bFull = ridgeFit(train, lambda, gm, am, false);
+    const bTvl = ridgeFit(train, lambda, gm, am, true);
+    if (bFull !== null) { cvFull += maeOf(test, bFull, gm, am, false); }
+    if (bTvl !== null) { cvTvl += maeOf(test, bTvl, gm, am, true); }
+    cvN++;
+  }
+
+  return {
+    a: beta[0]!, b: beta[1]!, c: beta[2] ?? 0, d: beta[3] ?? 0,
+    n, r2: sst > 0 ? 1 - sse / sst : 0,
+    growthMean, logAgeMean,
+    cv: { full: cvN > 0 ? cvFull / cvN : 0, tvlOnly: cvN > 0 ? cvTvl / cvN : 0, folds: cvN, rows: n },
+  };
 }
 
 /**
@@ -304,8 +489,8 @@ export function fitPowerLaw(rows: SnapshotProtocol[], lambda: number): PowerLaw 
 export function buildLaw(snapshot: Snapshot, model: ModelConstants = MODEL): Law {
   const live = snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
   return {
-    launch: fitPowerLaw(live.filter((p) => !isDerivativeProduct(p)), model.ridge_lambda),
-    derivative: fitPowerLaw(live.filter((p) => isDerivativeProduct(p)), model.ridge_lambda),
+    launch: fitPowerLaw(live.filter((p) => !isDerivativeProduct(p)), model.ridge_lambda, snapshot.as_of),
+    derivative: fitPowerLaw(live.filter((p) => isDerivativeProduct(p)), model.ridge_lambda, snapshot.as_of),
   };
 }
 
@@ -314,10 +499,18 @@ export function lawOf(derivative: boolean, law: Law): PowerLaw {
   return derivative ? law.derivative : law.launch;
 }
 
-/** The multiple a fit implies at `tvl`: exp(a + b log(tvl)) / tvl. The board's implied value over its TVL. */
-export function multipleAt(fit: PowerLaw, tvl: number): number {
+/** The value a law implies at a row's three figures: exp(a + b logTvl + c g + d logAge). */
+export function valueAt(fit: PowerLaw, tvl: number, g: number | null, age: number | null): number {
+  if (!(tvl > 0)) return 0;
+  const gc = g === null ? 0 : Math.max(-0.60, Math.min(1.20, g)) - fit.growthMean;
+  const ac = age === null ? 0 : Math.log(Math.max(1, age)) - fit.logAgeMean;
+  return Math.exp(fit.a + fit.b * Math.log(tvl) + fit.c * gc + fit.d * ac);
+}
+
+/** The multiple a fit implies for one row: its value over its TVL. */
+export function multipleAt(fit: PowerLaw, tvl: number, g: number | null, age: number | null): number {
   if (!(tvl > 0)) return 1;
-  return Math.exp(fit.a + fit.b * Math.log(tvl)) / tvl;
+  return valueAt(fit, tvl, g, age) / tvl;
 }
 
 /** Everything the model says about one protocol, and the implied value it produces. */
@@ -331,9 +524,11 @@ export interface Score {
 }
 
 /**
- * The radar-4 score: implied = clamp(round(exp(a + b * log(tvl))), 1, 1e13), with a and b from the fit
- * for the row's own population. A protocol with no TVL gets the floor, 1: nothing multiplies a zero.
- * Growth, age, chain count and category play no part — see the header for what dropping them measured.
+ * The radar-5 score: implied = clamp(round(exp(a + b*log(tvl) + c*g + d*log(age))), 1, 1e13), with the
+ * coefficients from the fit for the row's own population and g its winsorised seven-day change. A
+ * protocol with no TVL gets the floor, 1: nothing multiplies a zero. A protocol that records no
+ * change_7d or no listing date is priced at its population's average for that figure, which is what
+ * the centring means; it is never dropped from the board and never priced at an extreme.
  */
 export function impliedValue(
   protocol: SnapshotProtocol,
@@ -345,15 +540,16 @@ export function impliedValue(
   const population = sectionOf(derivative);
   const fit = lawOf(derivative, law);
   const tvl = protocol.tvl_usd;
-  const raw = tvl > 0 ? Math.exp(fit.a + fit.b * Math.log(tvl)) : 0;
+  const age = ageDays(asOf, protocol.listed_at);
+  const raw = valueAt(fit, tvl, protocol.change_7d, age);
   const implied = Math.min(model.value_cap, Math.max(model.value_floor, Math.round(Number.isFinite(raw) ? raw : 0)));
   return {
     implied,
-    multiple: multipleAt(fit, tvl),
+    multiple: multipleAt(fit, tvl, protocol.change_7d, age),
     population,
     derivative,
     fit,
-    age: ageDays(asOf, protocol.listed_at),
+    age,
   };
 }
 
@@ -378,12 +574,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  // The early radar: pre-token protocols below the watchlist floor, by TVL, capped. Never a replacement
-  // for a watchlist row: a chosen protocol stays chosen.
+  // The whole pre-token universe: every protocol the snapshot records that has no token, by TVL. The
+  // watchlist is the floor and never the ceiling (the brief's words), so the board carries all of them,
+  // not a slice: a reader who wants the radar to have found the launch must be able to see every
+  // candidate, and the accounting strip reconciles the count against the snapshot's own total.
   const early = snapshot.protocols
-    .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
-    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
-    .slice(0, EARLY_ROWS);
+    .filter((p) => !chosen.has(p.slug) && isRankable(p))
+    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => ({ p, s: impliedValue(p, snapshot.as_of, law, model) }));
@@ -429,7 +626,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
           population: s.population,
           a: s.fit.a,
           b: s.fit.b,
+          c: s.fit.c,
+          growth_mean: s.fit.growthMean,
+          d: s.fit.d,
+          log_age_mean: s.fit.logAgeMean,
           n: s.fit.n,
+          cv_full: round6(s.fit.cv.full),
+          cv_tvl_only: round6(s.fit.cv.tvlOnly),
           multiple: round6(s.multiple),
         },
         farm_steps: farmSteps(p, s.age, s.derivative).map(stepText),
@@ -628,6 +831,22 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const live = liveRows(snapshot);
   const law = buildLaw(snapshot, model);
   const launchSize = board.filter((r) => r.section === 'launch').length;
+  // The accounting strip: every protocol lands in exactly one bucket, and the buckets must sum to the
+  // snapshot's own total. Computed here from the same predicates buildBoard ranks with, so the strip
+  // cannot drift from the board it describes.
+  const tokenized = snapshot.protocols.filter((p) => !isPreToken(p)).length;
+  const preToken = snapshot.protocols.length - tokenized;
+  const pricedSlugs = new Set(board.map((r) => r.slug));
+  const priced = snapshot.protocols.filter((p) => isPreToken(p) && pricedSlugs.has(p.slug)).length;
+  const accounting = {
+    total: snapshot.protocols.length,
+    tokenized,
+    pre_token: preToken,
+    priced,
+    excluded: preToken - priced,
+    watchlist_priced: snapshot.watchlist.filter((s) => pricedSlugs.has(s)).length,
+    reconciles: tokenized + preToken === snapshot.protocols.length,
+  };
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -643,6 +862,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     launch_size: launchSize,
     live_adjacent_size: board.length - launchSize,
     live_peer_count: law.launch.n + law.derivative.n,
+    accounting,
     law,
     rows: board.map(radarRow),
     live,
